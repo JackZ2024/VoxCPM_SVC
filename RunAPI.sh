@@ -13,4 +13,4 @@ fi
 source "$ENV_NAME/bin/activate"
 
 # 运行 Python 脚本
-python3 api.py --host 0.0.0.0 --port 7862
+python -m uvicorn api:app --host 0.0.0.0 --port 8080

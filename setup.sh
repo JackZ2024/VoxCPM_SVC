@@ -33,7 +33,10 @@ source "$ENV_NAME/bin/activate"
 if [ -f "requirements.txt" ]; then
     echo ">>> 检测到 requirements.txt，正在安装依赖..."
     pip install --upgrade pip
+    python -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cu129
     pip install -r requirements.txt
+    python -m pip install -e ./VoxCPM
     echo ">>> 依赖安装完成。"
 else
     echo ">>> 未找到 requirements.txt，跳过依赖安装。"

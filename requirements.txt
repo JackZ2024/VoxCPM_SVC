@@ -5,7 +5,7 @@ torchaudio>=2.5.0
 
 # VoxCPM TTS. Its transitive dependencies include transformers, einops,
 # torchcodec, wetext, safetensors, and the AudioVAE runtime.
-voxcpm
+# voxcpm
 
 # Web API and persistence
 fastapi
