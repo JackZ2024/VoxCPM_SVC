@@ -244,6 +244,16 @@ def safe_audio_stem(value: str, fallback: str) -> str:
     return stem[:120]
 
 
+def format_file_created_at(stat_result: os.stat_result) -> str:
+    """Format a file timestamp on Windows and Unix filesystems.
+
+    ``st_birthtime`` is available on Windows/macOS but not on most Linux
+    filesystems.  Linux therefore falls back to the file modification time.
+    """
+    timestamp = getattr(stat_result, "st_birthtime", stat_result.st_mtime)
+    return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+
+
 def split_generation_line(line: str, index: int) -> tuple[str, str]:
     """Extract an optional legacy line label and its TTS text.
 
@@ -548,7 +558,7 @@ class AudioGenerationTask:
                     filename=os.path.basename(file_path),
                     session_id=self.session_id,
                     size=stat.st_size,
-                    created_at=datetime.fromtimestamp(stat.st_birthtime).isoformat(timespec='seconds'),
+                    created_at=format_file_created_at(stat),
                 ))
 
         last_audio = None
@@ -558,7 +568,7 @@ class AudioGenerationTask:
                         filename=os.path.basename(self.last_file),
                         session_id=self.session_id,
                         size=stat.st_size,
-                        created_at=datetime.fromtimestamp(stat.st_birthtime).isoformat(timespec='seconds'),
+                        created_at=format_file_created_at(stat),
                     )
         
         return AudioFileList(
@@ -1323,7 +1333,7 @@ async def get_files_history(num: int):
                     filename=os.path.basename(file_path),
                     session_id=task.session_id,
                     size=stat.st_size,
-                    created_at=datetime.fromtimestamp(stat.st_birthtime).isoformat(timespec='seconds'),
+                    created_at=format_file_created_at(stat),
                 ))
 
     return AudioFileList(
