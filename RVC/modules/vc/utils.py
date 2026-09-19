@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 # from fairseq import checkpoint_utils
 
@@ -12,8 +13,8 @@ class HubertModelWithFinalProj(HubertModel):
         self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
 
 def load_hubert(config):
-
-    hubert_model = HubertModelWithFinalProj.from_pretrained("./infer/assets/hubert")
+    assets_root = Path(__file__).resolve().parents[2] / "assets"
+    hubert_model = HubertModelWithFinalProj.from_pretrained(str(assets_root / "hubert"))
     hubert_model = hubert_model.to(config.device)
     if config.is_half:
         hubert_model = hubert_model.half()

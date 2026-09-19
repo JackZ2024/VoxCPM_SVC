@@ -357,7 +357,6 @@
 
             const [genTexts, setGenTexts] = useState('');
             const [refText, setRefText] = usePersistedState('refText', '');
-            const [removeSilence, setRemoveSilence] = usePersistedState('removeSilence', false);
             const [saveLineAudio, setSaveLineAudio] = usePersistedState('saveLineAudio', false);
             // const [cbNoRef, setCbNoRef] = usePersistedState('cbNoRef', false);
             const [preGenText, setPreGenText] = usePersistedState('preGenText', '');
@@ -430,7 +429,7 @@
                         const response = await fetch(`${API_BASE_URL}/api/global-status`);
                         const data = await response.json();
                         if (data && data.status !== 'idle') {
-                            setRunningInfo(`TTS服务使用中 - ${data.task_name} ${data.completed_step}${data.progress}%`);
+                            setRunningInfo(`TTS服务使用中 - ${data.task_name} ${data.completed_step}`);
                         } else {
                             setRunningInfo('TTS服务可用');
                         }
@@ -755,7 +754,6 @@
                     language: selectedLanguage,
                     model_name: selectedModel,
                     gen_title: outputPrefix,
-                    remove_silence: removeSilence,
                     seed: randomizeSeed ? -1 : seed,
                     cross_fade_duration: Number.isFinite(parseFloat(crossFadeDuration)) ? parseFloat(crossFadeDuration) : 0.15,
                     nfe_step: parseInt(nfeStep) || 10,
@@ -1071,8 +1069,8 @@
                                     </select>
                                 </div>
                                 <div className="gr-input-wrapper md:col-span-3">
-                                    <span className="gr-label">输出音频前缀</span>
-                                    <input type="text" value={outputPrefix} onChange={(e) => setOutputPrefix(e.target.value)} className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white" />
+                                    <span className="gr-label">输出音频文件名（可留空）</span>
+                                    <input type="text" value={outputPrefix} onChange={(e) => setOutputPrefix(e.target.value)} placeholder="例如：第01章" className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white" />
                                 </div>
                             </div>
 
@@ -1131,16 +1129,15 @@
                                 
                                 {/* VoxCPM2 style-control prompt */}
                                 <div className="gr-input-wrapper md:col-span-1">
-                                    <span className="gr-label">提示词</span>
+                                    <span className="gr-label">提示词(风格控制：可描述情绪、语气、节奏等。)</span>
                                     <textarea
                                         value={stylePrompt}
                                         onChange={(e) => setStylePrompt(e.target.value)}
-                                        rows={3}
+                                        rows={1}
                                         maxLength={500}
                                         className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white resize-none"
                                         placeholder="例如：稍快一点，情绪欢快，语气自然"
                                     />
-                                    <span className="gr-info">VoxCPM2 风格控制：可描述情绪、语气、节奏等。</span>
                                 </div>
 
                                 <div className="gr-input-wrapper md:col-span-1 flex flex-row items-center justify-center gap-2">
@@ -1244,7 +1241,7 @@
                                             </div>
                                         </div>
 
-                                        {/* Row 6: 随机种子、删除静音、按行保存音频 */}
+                    {/* Row 6: 随机种子、按行保存音频 */}
                                         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                                             <div className="gr-input-wrapper flex flex-col justify-center">
                                                 <label className="flex items-center gap-2 cursor-pointer">
@@ -1273,26 +1270,13 @@
                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                     <input
                                                         type="checkbox"
-                                                        checked={removeSilence}
-                                                        onChange={(e) => setRemoveSilence(e.target.checked)}
-                                                        className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
-                                                    />
-                                                    <span className="text-xs font-semibold text-gray-700">删除静音</span>
-                                                </label>
-                                                <span className="gr-info">模型会自动生成静音，尤其是短音频，通过此选项可以移除静音。</span>
-                                            </div>
-
-                                            <div className="gr-input-wrapper flex flex-col justify-center">
-                                                <label className="flex items-center gap-2 cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
                                                         checked={saveLineAudio}
                                                         onChange={(e) => setSaveLineAudio(e.target.checked)}
                                                         className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
                                                     />
                                                     <span className="text-xs font-semibold text-gray-700">按行保存音频</span>
                                                 </label>
-                                                <span className="gr-info">勾选此项，中间结果会每行保存一个音频，不勾选，则每一个文本框保存一个音频。</span>
+                                                <span className="gr-info">勾选后会额外保存每一行的成品音频，文件以 segm_audio- 开头，可直接导入音色转换面板。行首的 001-、001_ 等编号会用于文件名且不会被朗读。</span>
                                             </div>
 
                                         </div>

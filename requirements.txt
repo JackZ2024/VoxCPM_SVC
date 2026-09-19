@@ -24,6 +24,7 @@ huggingface_hub
 
 # So-VITS-SVC runtime
 omegaconf
+PyYAML
 faiss-cpu
 pyworld
 torchcrepe==0.0.23

@@ -4,6 +4,7 @@ import traceback
 import logging
 import tempfile
 import shutil
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -174,11 +175,10 @@ class Pipeline(object):
             if not hasattr(self, "model_rmvpe"):
                 from infer.lib.rmvpe import RMVPE
 
-                logger.info(
-                    "Loading rmvpe model,%s" % "%s/rmvpe.pt" % "./infer/assets/rmvpe"
-                )
+                rmvpe_path = Path(__file__).resolve().parents[2] / "assets" / "rmvpe" / "rmvpe.pt"
+                logger.info("Loading rmvpe model,%s", rmvpe_path)
                 self.model_rmvpe = RMVPE(
-                    "%s/rmvpe.pt" % "./infer/assets/rmvpe",
+                    str(rmvpe_path),
                     is_half=self.is_half,
                     device=self.device,
                 )

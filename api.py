@@ -19,6 +19,7 @@ TODO
 """
 
 import os
+import gc
 import json
 import random
 import uuid
@@ -44,6 +45,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update, delete
 import numpy as np
 import soundfile as sf
+from pydub import AudioSegment
 
 from api_config import BASE_DIR, DEBUG, EXPIRED_SECONDS, VERSION
 from api_database import Base, engine, SessionLocal, Session, Task
@@ -56,9 +58,17 @@ VOXCPM_LORA_DIRS = (BASE_DIR / "lora_models", VOXCPM_MODEL_DIR / "lora")
 # torch.compile/Inductor requires a Triton version matched to the installed
 # PyTorch build. Keep it disabled by default for deployment compatibility.
 VOXCPM_OPTIMIZE = os.environ.get("VOXCPM_OPTIMIZE", "false").strip().lower() in {"1", "true", "yes"}
+# Set to 0 to keep VoxCPM2 resident permanently.  A positive value releases
+# model/LoRA GPU memory after the final request has been idle for that period.
+try:
+    VOXCPM_IDLE_UNLOAD_SECONDS = max(0.0, float(os.environ.get("VOXCPM_IDLE_UNLOAD_SECONDS", "1800")))
+except ValueError:
+    VOXCPM_IDLE_UNLOAD_SECONDS = 1800.0
 _voxcpm_model = None
 _active_lora_dir: Optional[Path] = None
-_voxcpm_model_lock = threading.Lock()
+_voxcpm_model_lock = threading.RLock()
+_voxcpm_active_users = 0
+_voxcpm_last_released_at = time.monotonic()
 
 
 def _has_complete_voxcpm_model(model_dir: Path) -> bool:
@@ -68,45 +78,133 @@ def _has_complete_voxcpm_model(model_dir: Path) -> bool:
     return (model_dir / "config.json").is_file() and has_main_weights and has_audio_vae
 
 
+def _get_lora_config(lora_dir: Optional[Path]):
+    """Build a LoRA topology for hot swapping, even when the base model is used."""
+    from voxcpm.model.voxcpm2 import LoRAConfig
+    if lora_dir is not None:
+        config_path = lora_dir / "lora_config.json"
+        with config_path.open("r", encoding="utf-8") as config_file:
+            config_data = json.load(config_file).get("lora_config", {})
+        if config_data:
+            return LoRAConfig(**config_data)
+    # The upstream VoxCPM WebUI uses this topology for a base model so that a
+    # matching LoRA can later be loaded without rebuilding model weights.
+    return LoRAConfig(
+        enable_lm=True,
+        enable_dit=True,
+        r=32,
+        alpha=16,
+        target_modules_lm=["q_proj", "v_proj", "k_proj", "o_proj"],
+        target_modules_dit=["q_proj", "v_proj", "k_proj", "o_proj"],
+    )
+
+
+def _same_lora_topology(current_config, new_config) -> bool:
+    """LoRA weights can be hot-swapped only when layer topology is identical."""
+    return current_config is not None and current_config.model_dump() == new_config.model_dump()
+
+
 def get_voxcpm_model(lora_dir: Optional[Path] = None):
-    """Load local weights, downloading the selected Hugging Face model if absent."""
+    """Load VoxCPM2 once and hot-swap compatible LoRA weights when requested."""
     global _voxcpm_model, _active_lora_dir
     with _voxcpm_model_lock:
-        if _voxcpm_model is None or _active_lora_dir != lora_dir:
+        if not _has_complete_voxcpm_model(VOXCPM_MODEL_DIR):
+            from huggingface_hub import snapshot_download
+            print(f"VoxCPM weights missing; downloading {VOXCPM_MODEL_ID} to {VOXCPM_MODEL_DIR} …")
+            VOXCPM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=VOXCPM_MODEL_ID,
+                local_dir=str(VOXCPM_MODEL_DIR),
+            )
+        if not _has_complete_voxcpm_model(VOXCPM_MODEL_DIR):
+            raise FileNotFoundError(f"VoxCPM download is incomplete: {VOXCPM_MODEL_DIR}")
+
+        target_config = _get_lora_config(lora_dir)
+        needs_rebuild = (
+            _voxcpm_model is None
+            or not _same_lora_topology(_voxcpm_model.tts_model.lora_config, target_config)
+        )
+        if needs_rebuild:
             from voxcpm import VoxCPM
-            if not _has_complete_voxcpm_model(VOXCPM_MODEL_DIR):
-                from huggingface_hub import snapshot_download
-                print(f"VoxCPM weights missing; downloading {VOXCPM_MODEL_ID} to {VOXCPM_MODEL_DIR} …")
-                VOXCPM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-                snapshot_download(
-                    repo_id=VOXCPM_MODEL_ID,
-                    local_dir=str(VOXCPM_MODEL_DIR),
-                )
-            if not _has_complete_voxcpm_model(VOXCPM_MODEL_DIR):
-                raise FileNotFoundError(f"VoxCPM download is incomplete: {VOXCPM_MODEL_DIR}")
-            # A LoRA topology must be present when the base model is created;
-            # therefore changing the selected LoRA recreates the serial-worker model.
-            lora_kwargs = {}
-            if lora_dir is not None:
-                from voxcpm.model.voxcpm2 import LoRAConfig
-                config_path = lora_dir / "lora_config.json"
-                with config_path.open("r", encoding="utf-8") as config_file:
-                    lora_kwargs = {
-                        "lora_config": LoRAConfig(**json.load(config_file)["lora_config"]),
-                        "lora_weights_path": str(lora_dir),
-                    }
             _voxcpm_model = VoxCPM.from_pretrained(
                 str(VOXCPM_MODEL_DIR),
                 load_denoiser=False,
                 optimize=VOXCPM_OPTIMIZE,
-                **lora_kwargs,
+                lora_config=target_config,
             )
             if _voxcpm_model.tts_model.__class__.__name__ != "VoxCPM2Model":
                 actual_model_type = _voxcpm_model.tts_model.__class__.__name__
                 _voxcpm_model = None
                 raise ValueError(f"仅支持 VoxCPM2，当前加载的模型类型为：{actual_model_type}")
+
+        if lora_dir is None:
+            _voxcpm_model.set_lora_enabled(False)
+            _active_lora_dir = None
+        elif _active_lora_dir != lora_dir or needs_rebuild:
+            # Clear the prior adapter before copying a new adapter into the
+            # already-created LoRA layers.  This avoids rebuilding VoxCPM2 for
+            # ordinary compatible adapter switches.
+            _voxcpm_model.unload_lora()
+            _voxcpm_model.load_lora(str(lora_dir))
+            _voxcpm_model.set_lora_enabled(True)
             _active_lora_dir = lora_dir
+        else:
+            _voxcpm_model.set_lora_enabled(True)
     return _voxcpm_model
+
+
+def acquire_voxcpm_model(lora_dir: Optional[Path] = None):
+    """Reserve the shared model so idle cleanup cannot unload it mid-request."""
+    global _voxcpm_active_users
+    with _voxcpm_model_lock:
+        model = get_voxcpm_model(lora_dir)
+        _voxcpm_active_users += 1
+        return model
+
+
+def release_voxcpm_model() -> None:
+    """Mark one completed inference request and begin its idle timeout."""
+    global _voxcpm_active_users, _voxcpm_last_released_at
+    with _voxcpm_model_lock:
+        _voxcpm_active_users = max(0, _voxcpm_active_users - 1)
+        if _voxcpm_active_users == 0:
+            _voxcpm_last_released_at = time.monotonic()
+
+
+def unload_voxcpm_model_if_idle() -> bool:
+    """Free base-model and LoRA memory when no request has used them recently."""
+    global _voxcpm_model, _active_lora_dir
+    if VOXCPM_IDLE_UNLOAD_SECONDS <= 0:
+        return False
+    with _voxcpm_model_lock:
+        if (
+            _voxcpm_model is None
+            or _voxcpm_active_users > 0
+            or time.monotonic() - _voxcpm_last_released_at < VOXCPM_IDLE_UNLOAD_SECONDS
+        ):
+            return False
+        _voxcpm_model = None
+        _active_lora_dir = None
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception as exc:
+        print(f"VoxCPM CUDA cache cleanup skipped: {exc}")
+    print("VoxCPM2 unloaded after idle timeout")
+    return True
+
+
+def _voxcpm_idle_unloader() -> None:
+    """Background worker that makes model unloading independent of new requests."""
+    while True:
+        time.sleep(60)
+        try:
+            unload_voxcpm_model_if_idle()
+        except Exception as exc:
+            print(f"VoxCPM idle cleanup failed: {exc}")
 
 
 def get_language_lora_models(language: str) -> dict[str, Path]:
@@ -134,6 +232,34 @@ def seed_voxcpm(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def safe_audio_stem(value: str, fallback: str) -> str:
+    """Return a portable filename stem while retaining readable Unicode names."""
+    stem = re.sub(r"[<>:\"/\\\\|?*\x00-\x1f]", "_", (value or "").strip())
+    stem = re.sub(r"\s+", "_", stem).strip(". _")
+    if not stem:
+        stem = fallback
+    # Windows device names cannot be used as filenames, even with an extension.
+    if stem.upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        stem = f"_{stem}"
+    return stem[:120]
+
+
+def split_generation_line(line: str, index: int) -> tuple[str, str]:
+    """Extract an optional legacy line label and its TTS text.
+
+    A source line such as ``001- 你好`` becomes label ``001-`` and text ``你好``.
+    Lines without a prefix receive their stable 3-digit generation index.
+    """
+    text = line.strip()
+    match = re.match(r"^[\d_-]+", text)
+    if not match:
+        return f"{index:03d}", text
+    label = match.group(0)
+    remaining = text[len(label):].lstrip(" \t._-")
+    # Do not turn a line consisting only of a label into an empty synthesis input.
+    return safe_audio_stem(label, f"{index:03d}"), remaining or text
+
+
 class TaskStatus(Enum):
     """任务状态枚举"""
     PENDING = "pending"
@@ -151,7 +277,6 @@ class AudioGenerationRequest(BaseModel):
     language: str = Field(..., description="语言")
     model_name: str = Field(..., description="模型名称")
     gen_title: str = Field(..., description="生成音频的标题")
-    remove_silence: bool = Field(default=False, description="移除静音")
     seed: int = Field(default=-1, description="随机种子")
     cross_fade_duration: float = Field(default=0.15, ge=0, le=10, description="相邻分段间的静音长度（秒）")
     nfe_step: int = Field(default=10, ge=1, le=100, description="VoxCPM扩散推理步数")
@@ -253,13 +378,18 @@ class AudioGenerationTask:
         self.completed_step = ""
         self.created_at = datetime.now(timezone.utc)
         self.updated_at = datetime.now(timezone.utc)
+        self.heartbeat_at = self.updated_at
         self.result_files: List[str] = list()
         self.last_file = ""
         self.used_seed = -1
         self.error_message = None
         self.thread = None
+        self.heartbeat_thread = None
         self.used_seed_ready = threading.Event()
         self._stop_event = threading.Event()
+        self._heartbeat_stop_event = threading.Event()
+        self._save_lock = threading.Lock()
+        self._voxcpm_model_acquired = False
 
         self.task_instance = Task(
             session_id=self.session_id,
@@ -268,6 +398,8 @@ class AudioGenerationTask:
             result_files=self.result_files,
             last_file = self.last_file,
             used_seed=self.used_seed,
+            error_message=self.error_message,
+            heartbeat_at=self.heartbeat_at,
             request_data=self.request_data.model_dump(),
         )
     
@@ -280,41 +412,63 @@ class AudioGenerationTask:
             db.close()
 
     def save(self) :
-        with self._get_db() as db :
-            task_to_save = db.execute(select(Task).where(Task.session_id == self.session_id)).scalars().first()
-            try :
-                if task_to_save and task_to_save.session_id == self.task_instance.session_id :
-                    db.execute(update(Task).where(Task.session_id == self.session_id).values(
-                        status=self.status.value,
-                        progress=self.progress,
-                        result_files=self.result_files,
-                        last_file=self.last_file,
-                        used_seed=self.used_seed,
-                        updated_at=self.updated_at,
-                    ))
-                    db.commit()
-                else :
-                    db.add(self.task_instance)
-                    db.commit()
-                    db.refresh(self.task_instance)
-            except Exception :
-                db.rollback()
-                raise
+        with self._save_lock:
+            with self._get_db() as db :
+                task_to_save = db.execute(select(Task).where(Task.session_id == self.session_id)).scalars().first()
+                try :
+                    if task_to_save and task_to_save.session_id == self.task_instance.session_id :
+                        db.execute(update(Task).where(Task.session_id == self.session_id).values(
+                            status=self.status.value,
+                            progress=self.progress,
+                            result_files=self.result_files,
+                            last_file=self.last_file,
+                            used_seed=self.used_seed,
+                            error_message=self.error_message,
+                            heartbeat_at=self.heartbeat_at,
+                            updated_at=self.updated_at,
+                        ))
+                        db.commit()
+                    else :
+                        db.add(self.task_instance)
+                        db.commit()
+                        db.refresh(self.task_instance)
+                except Exception :
+                    db.rollback()
+                    raise
 
     def start(self):
         """启动任务"""
         self.status = TaskStatus.RUNNING
+        self.updated_at = datetime.now(timezone.utc)
+        self.heartbeat_at = self.updated_at
+        self.save()
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
         self.thread = threading.Thread(target=self._generate_audio)
         self.thread.start()
+
+    def _heartbeat_loop(self):
+        """Persist liveness while a long model call is still executing."""
+        while not self._heartbeat_stop_event.wait(15):
+            if self.status != TaskStatus.RUNNING:
+                return
+            self.updated_at = datetime.now(timezone.utc)
+            self.heartbeat_at = self.updated_at
+            try:
+                self.save()
+            except Exception as exc:
+                print(f"任务心跳保存失败 {self.session_id}: {exc}")
     
     def stop(self):
         """停止任务"""
         self._stop_event.set()
+        self._heartbeat_stop_event.set()
         self.thread.join(timeout=30)
         if self.thread and self.thread.is_alive():
             raise OSError('Timeout when stopping task')
         self.status = TaskStatus.CANCELLED
         self.updated_at = datetime.now(timezone.utc)
+        self.heartbeat_at = self.updated_at
         self.save()
     
     def get_used_seed(self, timeout=30) :
@@ -333,7 +487,6 @@ class AudioGenerationTask:
             language: str = Field(..., description="语言")
             model_name: str = Field(..., description="模型名称")
             gen_title: str = Field(..., description="生成文件名前缀")
-            remove_silence: bool = Field(default=False, description="移除静音")
             seed: int = Field(default=-1, description="随机种子")
             cross_fade_duration: float = Field(default=0.15, description="交叉淡入淡出持续时间")
             nfe_step: int = Field(default=32, description="NFE步数")
@@ -363,7 +516,12 @@ class AudioGenerationTask:
             self.error_message = traceback.format_exc() if DEBUG else 'Task failed!'
             print("生成失败----", e)
         finally:
+            self._heartbeat_stop_event.set()
+            if self._voxcpm_model_acquired:
+                release_voxcpm_model()
+                self._voxcpm_model_acquired = False
             self.updated_at = datetime.now(timezone.utc)
+            self.heartbeat_at = self.updated_at
             self.save()
     
     def get_progress(self) -> TaskProgress:
@@ -418,11 +576,14 @@ class AudioGenerationTask:
         )
 
     def is_expired(self) :
-        return (datetime.now(timezone.utc) - self.updated_at).seconds > EXPIRED_SECONDS
+        updated_at = self.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated_at).total_seconds() > EXPIRED_SECONDS
 
     def _infer(self):
         """Generate VoxCPM ultimate-clone segments, then optionally apply SVC/RVC."""
-        from voxcpm_postprocess import concatenate_with_silence, remove_silence, rvc_convert_audio, sovits_convert_audio
+        from voxcpm_postprocess import concatenate_with_silence, rvc_convert_audio, sovits_convert_audio
 
         request = self.request_data
         ref_path = BASE_DIR / "refs" / request.language / request.ref_audio_orig
@@ -434,9 +595,15 @@ class AudioGenerationTask:
         seed = request.seed if 0 <= request.seed <= 2**31 - 1 else int(np.random.randint(0, 2**31 - 1))
         self.used_seed = seed
         self.used_seed_ready.set()
-        texts = [line.strip() for line in request.gen_texts.splitlines() if line.strip()]
-        if not texts:
+        seed_voxcpm(seed)
+
+        source_lines = [line for line in request.gen_texts.splitlines() if line.strip()]
+        if not source_lines:
             raise ValueError("缺少要生成的文本")
+
+        # Keep legacy numbered-line behavior: a leading ``001-`` / ``001_`` is
+        # used as the individual file label and is not read aloud.
+        texts = [split_generation_line(line, index) for index, line in enumerate(source_lines, start=1)]
 
         output_dir = BASE_DIR / "last_audio" / self.session_id
         temp_dir = output_dir / "tmp"
@@ -448,15 +615,16 @@ class AudioGenerationTask:
         lora_dir = None if request.model_name == "None" else get_language_lora_models(request.language).get(request.model_name)
         if request.model_name != "None" and lora_dir is None:
             raise FileNotFoundError(f"LoRA 模型不存在：{request.model_name}")
-        model = get_voxcpm_model(lora_dir)
+        model = acquire_voxcpm_model(lora_dir)
+        self._voxcpm_model_acquired = True
         sample_rate = model.tts_model.sample_rate
-        waves, names = [], []
-        for index, text in enumerate(texts, start=1):
+        generated_waves, line_labels = [], []
+        for index, (line_label, text) in enumerate(texts, start=1):
             if self._stop_event.is_set():
                 self.status = TaskStatus.CANCELLED
                 return "", []
             self.completed_step = f"{index}/{len(texts)}"
-            seed_voxcpm(seed + index - 1)
+            
             styled_text = f"({request.style_prompt.strip()}){text}" if request.style_prompt.strip() else text
             generate_args = dict(
                 text=styled_text,
@@ -477,24 +645,78 @@ class AudioGenerationTask:
                     sample_rate, wave = rvc_convert_audio(str(intermediate), model_path, aux_path, request.rvc_index_rate, request.tone_shift)
                 if wave is None:
                     raise RuntimeError("RVC 音频转换失败")
-            waves.append(np.asarray(wave, dtype=np.float32))
-            names.append(f"{index:03d}")
+            generated_waves.append(np.asarray(wave, dtype=np.float32))
+            line_labels.append(line_label)
             self.progress = int(index / len(texts) * 100)
             self.updated_at = datetime.now(timezone.utc)
+            self.heartbeat_at = self.updated_at
+            self.save()
 
-        final_wave = concatenate_with_silence(waves, sample_rate, request.cross_fade_duration)
-        if request.remove_silence:
-            final_wave = remove_silence(final_wave, sample_rate)
-        title = re.sub(r"[^\w.-]+", "_", request.gen_title).strip("._") or "voxcpm_clone"
-        final_path = output_dir / f"{title}.wav"
-        sf.write(final_path, final_wave, sample_rate, "PCM_24")
-        files = [str(final_path)]
+        output_audio_list = []
+        pre_name = "orgi_audio"
+        svc_type_str = ""
+        s_version_str = ""
+        s_version = request.svc_model.rpartition('-')[-1]
+        if request.model_name != "None":
+            f_version = request.model_name.rpartition('-')[-1]
+        else:
+            f_version = "0"
+        if enable_svc:
+            pre_name = "svc_audio"
+            svc_type_str = request.svc_type.lower().lower()[0]
+            s_version_str = str(s_version) + "-"
+
+        gen_title = request.gen_title
         if request.save_line_audio:
-            for name, wave in zip(names, waves):
-                path = output_dir / f"{title}-{name}.wav"
-                sf.write(path, wave, sample_rate, "PCM_24")
-                files.append(str(path))
-        return str(final_path), files
+            # 按行保存
+            for i, audio_wave in enumerate(generated_waves):
+                if gen_title != "":
+                    audio_filepath = output_dir / f"{gen_title}-{i}.wav"
+                else:
+                    audio_filepath = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}_{i}.wav"
+                sf.write(audio_filepath, audio_wave, sample_rate, 'PCM_24')
+                output_audio_list.append(str(audio_filepath))
+            final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
+            if gen_title != "":
+                last_gen_audio_path = output_dir / f"{gen_title}.mp3"
+            else:
+                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.mp3"
+            
+            print(final_waves)
+            # 如果是 float32/float64，范围通常是 [-1, 1]
+            audio_int16 = (final_waves * 32767).astype(np.int16)
+            audio = AudioSegment(
+                audio_int16.tobytes(),
+                frame_rate=sample_rate,
+                sample_width=2,  # int16 = 2 bytes
+                channels=1
+            )
+            audio.export(last_gen_audio_path, format="mp3", bitrate="192k")
+            
+        else:
+            # 导出转换后音频
+            if gen_title != "":
+                last_gen_audio_path = output_dir / f"{gen_title}.mp3"
+                gen_audio_path = output_dir / f"{gen_title}.wav"
+            else:
+                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.mp3"
+                gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.wav"
+            final_waves = None
+            if len(generated_waves) > 0:
+                final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
+                sf.write(gen_audio_path, final_waves, sample_rate, 'PCM_24')
+                output_audio_list.append(str(gen_audio_path))
+
+                audio_int16 = (final_waves * 32767).astype(np.int16)
+                audio = AudioSegment(
+                    audio_int16.tobytes(),
+                    frame_rate=sample_rate,
+                    sample_width=2,  # int16 = 2 bytes
+                    channels=1
+                )
+                audio.export(last_gen_audio_path, format="mp3", bitrate="192k")
+
+        return str(last_gen_audio_path), output_audio_list
 
 
 class TaskManager:
@@ -570,6 +792,8 @@ class TaskManager:
                     task_one.result_files=history_one.result_files
                     task_one.last_file=history_one.last_file
                     task_one.used_seed=history_one.used_seed
+                    task_one.error_message=history_one.error_message
+                    task_one.heartbeat_at=history_one.heartbeat_at
                     return task_one
                 else:
                     return None
@@ -734,6 +958,34 @@ def get_svc_model(enable_svc, svc_type, svc_model, lang_alone):
 
 # 创建FastAPI应用
 Base.metadata.create_all(bind=engine)
+
+
+def recover_interrupted_tasks() -> None:
+    """Migrate task columns and close work abandoned by a previous process."""
+    now = datetime.now(timezone.utc)
+    with engine.begin() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(tasks)")}
+        if "error_message" not in columns:
+            connection.exec_driver_sql("ALTER TABLE tasks ADD COLUMN error_message TEXT")
+        if "heartbeat_at" not in columns:
+            connection.exec_driver_sql("ALTER TABLE tasks ADD COLUMN heartbeat_at DATETIME")
+        result = connection.execute(
+            update(Task)
+            .where(Task.status.in_((TaskStatus.PENDING.value, TaskStatus.RUNNING.value)))
+            .values(
+                status=TaskStatus.FAILED.value,
+                error_message="服务重启，任务已中断。",
+                updated_at=now,
+                heartbeat_at=now,
+            )
+        )
+    if result.rowcount:
+        print(f"已将 {result.rowcount} 个服务重启前未完成的任务标记为失败")
+
+
+recover_interrupted_tasks()
+if VOXCPM_IDLE_UNLOAD_SECONDS > 0:
+    threading.Thread(target=_voxcpm_idle_unloader, name="voxcpm-idle-unloader", daemon=True).start()
 app = FastAPI(title="音频生成服务API", version=VERSION)
 last_cleanup_time = time.time()
 cleanup_lock = threading.Lock()
@@ -861,25 +1113,21 @@ async def get_available_options():
 
 
 @app.get("/api/global-status", response_model=GlobalTaskStatus)
-async def get_global_status() :
+async def get_global_status():
     """
     获取当前是否有任务在执行
     """
-    for history in task_manager.task_history :
-        if history.status in (
-            TaskStatus.RUNNING, TaskStatus.RUNNING.value,
-            TaskStatus.PENDING, TaskStatus.PENDING.value,
-        ) :
-            task = task_manager.get_task(history.session_id)
-            if task:
-                current_status = {
-                    'status': task.status,
-                    'task_name': task.request_data.language,
-                    'completed_step': task.completed_step,
-                    'progress': task.progress,
-                }
-                break
-    else :
+    task = task_manager.current_task
+    if task and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        current_status = {
+            'status': task.status.value,
+            'task_name': task.request_data.language,
+            'completed_step': task.completed_step,
+            'progress': task.progress,
+        }
+    else:
+        # Database history represents past tasks only; it never makes this
+        # process busy after a restart.
         current_status = {
             'status': 'idle',
             'task_name': '',
@@ -1085,33 +1333,33 @@ async def get_files_history(num: int):
             total_count=len(files)
         )
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # 返回一个 204 状态码，告诉浏览器：“我收到了，但我没有图标提供给你”
+    return FileResponse("favicon.ico")
+
 @app.get("/")
 async def info():
     """
     API根路径
     """
 
-    # 如果请求的是前端根目录下的特定文件（如 favicon.ico, manifest.json 等）
-    # file_path = FRONTEND_DIR / catchall
-    # if file_path.is_file():
-    #     return FileResponse(file_path)
-    
-    # 否则，一律返回 index.html
-    return FileResponse("index.html")
-
-
-    return {
-        "service": "音频生成服务",
-        "version": VERSION,
-        "endpoints": {
-            "options": "/api/options",
-            "generate": "/api/generate-audio",
-            "progress": "/api/task/{session_id}/progress",
-            "files": "/api/task/{session_id}/files",
-            "download": "/api/task/{session_id}/download?filename=xxx",
-            "cancel": "/api/task/{session_id}/cancel",
-            "status": "/api/global-status"
-        }
+    ## 否则，一律返回 index.html
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    else:
+        return {
+            "service": "音频生成服务",
+            "version": VERSION,
+            "endpoints": {
+                "options": "/api/options",
+                "generate": "/api/generate-audio",
+                "progress": "/api/task/{session_id}/progress",
+                "files": "/api/task/{session_id}/files",
+                "download": "/api/task/{session_id}/download?filename=xxx",
+                "cancel": "/api/task/{session_id}/cancel",
+                "status": "/api/global-status"
+            }
     }
 
 

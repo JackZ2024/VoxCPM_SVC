@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import shutil
+from pathlib import Path
 from multiprocessing import cpu_count
 
 import torch
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 version_config_list = [
     "v2/48k.json",
 ]
+RVC_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_ROOT = RVC_ROOT / "configs"
 
 
 def singleton_variable(func):
@@ -60,10 +63,11 @@ class Config:
     def load_config_json() -> dict:
         d = {}
         for config_file in version_config_list:
-            p = f"infer/configs/inuse/{config_file}"
-            if not os.path.exists(p):
-                shutil.copy(f"infer/configs/{config_file}", p)
-            with open(f"infer/configs/inuse/{config_file}", "r") as f:
+            p = CONFIG_ROOT / "inuse" / config_file
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(CONFIG_ROOT / config_file, p)
+            with p.open("r", encoding="utf-8") as f:
                 d[config_file] = json.load(f)
         return d
 
@@ -122,9 +126,10 @@ class Config:
     def use_fp32_config(self):
         for config_file in version_config_list:
             self.json_config[config_file]["train"]["fp16_run"] = False
-            with open(f"infer/configs/inuse/{config_file}", "r") as f:
+            config_path = CONFIG_ROOT / "inuse" / config_file
+            with config_path.open("r", encoding="utf-8") as f:
                 strr = f.read().replace("true", "false")
-            with open(f"infer/configs/inuse/{config_file}", "w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 f.write(strr)
             logger.info("overwrite " + config_file)
         self.preprocess_per = 3.0

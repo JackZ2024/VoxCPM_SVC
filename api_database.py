@@ -49,6 +49,8 @@ class Task(Base) :
     result_files: Mapped[list[str]] = mapped_column(JSON, default=list())
     last_file: Mapped[str] = mapped_column(String(""), nullable=False)
     used_seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def is_stopped(self) -> bool :
         return self.status in (
