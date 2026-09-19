@@ -1,0 +1,37 @@
+# Runtime dependencies for the VoxCPM + SVC/RVC web service.
+# Install a CUDA-compatible torch/torchaudio build first; VoxCPM requires >= 2.5.
+torch>=2.5.0
+torchaudio>=2.5.0
+
+# VoxCPM TTS. Its transitive dependencies include transformers, einops,
+# torchcodec, wetext, safetensors, and the AudioVAE runtime.
+voxcpm
+
+# Web API and persistence
+fastapi
+uvicorn[standard]
+pydantic>=2.10,<3
+sqlalchemy
+
+# Shared audio handling and VoxCPM/SVC/RVC runtime
+numpy>=1.24,<2
+scipy
+soundfile>=0.14
+librosa
+resampy
+tqdm>=4.65.0
+huggingface_hub
+
+# So-VITS-SVC runtime
+omegaconf
+faiss-cpu
+pyworld
+torchcrepe==0.0.23
+praat-parselmouth
+scikit-learn
+fsspec
+matplotlib
+
+# RVC runtime
+transformers
+

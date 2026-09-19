@@ -1,0 +1,1812 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS-SVC_v6</title>
+    <!-- 使用 Gradio 的基础字体体系 -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/wavesurfer.js/7.7.7/wavesurfer.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Source Sans Pro', 'sans-serif'],
+                        mono: ['IBM Plex Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* 深度复刻 Gradio 主题样式与容器质感 */
+        body {
+            background-color: #f9fafb;
+            /* Gradio 默认淡灰背景 */
+        }
+
+        /* Gradio 块容器（gr.Blocks / Row / Group / Box） */
+        .gr-block {
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        /* Gradio 控件容器，带有内部包裹边框 */
+        .gr-input-wrapper {
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 8px 12px;
+            transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+        }
+
+        .gr-input-wrapper:focus-within {
+            border-color: #ff9800;
+            /* Gradio 经典主色调之一橙黄色 */
+            box-shadow: 0 0 0 2px rgba(255, 152, 0, 0.2);
+        }
+
+        /* 控件标签 */
+        .gr-label {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #4b5563;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 2px;
+        }
+
+        /* Gradio 的 Info 文本提示 */
+        .gr-info {
+            font-size: 0.7rem;
+            color: #9ca3af;
+            margin-top: 1px;
+            line-height: 1.2;
+        }
+
+        /* 控件输入框 */
+        .gr-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            outline: none;
+            font-size: 0.9rem;
+            color: #1f2937;
+            padding: 2px 0;
+        }
+
+        /* Gradio Tab 选项卡样式 */
+        .gr-tab-btn {
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+
+        .gr-tab-btn.active {
+            border-color: #ff9800;
+            color: #ff9800;
+            font-weight: 600;
+        }
+
+        /* Gradio Button Primary 橙黄色 */
+        .gr-button-primary {
+            background-color: #ff9800;
+            color: #ffffff;
+            border: 1px solid #e5a93b;
+            font-weight: 600;
+            transition: background-color 0.15s ease-in-out;
+        }
+
+        .gr-button-primary:hover:not(:disabled) {
+            background-color: #e68a00;
+        }
+
+        .gr-button-primary:disabled {
+            background-color: #fed7aa;
+            cursor: not-allowed;
+        }
+
+        /* Gradio Button Secondary 灰色按钮 */
+        .gr-button-secondary {
+            background-color: #f3f4f6;
+            color: #374151;
+            border: 1px solid #e5e7eb;
+            font-weight: 600;
+            transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+        }
+
+        .gr-button-secondary:hover:not(:disabled) {
+            background-color: #e5e7eb;
+        }
+
+        /* 定制滑动条 */
+        input[type="range"] {
+            accent-color: #ff9800;
+        }
+
+        /* 美化音频 */
+        audio {
+            height: 32px;
+        }
+    </style>
+</head>
+
+<body class="font-sans antialiased text-gray-800 p-4 md:p-8">
+    <!-- _version="2.0.0" -->
+    <div id="root" class="max-w-7xl mx-auto"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // 同源相对基地址，部署无痛自适应 
+        const API_BASE_URL = '';
+
+        // ==================== 通用持久化 Hook ====================
+        function usePersistedState(key, defaultValue) {
+            const [state, setState] = useState(() => {
+                try {
+                    const saved = localStorage.getItem(key);
+                    return saved !== null ? JSON.parse(saved) : defaultValue;
+                } catch (e) {
+                    console.warn(`读取 ${key} 失败`, e);
+                    return defaultValue;
+                }
+            });
+
+            useEffect(() => {
+                try {
+                    localStorage.setItem(key, JSON.stringify(state));
+                } catch (e) {
+                    console.warn(`保存 ${key} 失败`, e);
+                }
+            }, [key, state]);
+
+            return [state, setState];
+        }
+
+        const Download = () => (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+        );
+        const Copy = () => (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+        );
+        const Plus = () => (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" > 
+                <line x1="12" y1="5" x2="12" y2="19"></line> 
+                <line x1="5" y1="12" x2="19" y2="12"></line> 
+            </svg>
+            );
+
+        // 高保真 Gradio-like 波形音频播放组件
+        function AudioWaveformPlayer({ src, label, filename, onDownload }) {
+            const containerRef = useRef(null);
+            const waveSurferRef = useRef(null);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [currentTime, setCurrentTime] = useState('0:00');
+            const [duration, setDuration] = useState('0:00');
+            const [isMuted, setIsMuted] = useState(false);
+
+            const formatTime = (time) => {
+                if (isNaN(time)) return '0:00';
+                const mins = Math.floor(time / 60);
+                const secs = Math.floor(time % 60);
+                return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+            };
+
+            useEffect(() => {
+                if (!containerRef.current || !src) return;
+
+                // 创建 WaveSurfer 实例
+                const ws = WaveSurfer.create({
+                    container: containerRef.current,
+                    waveColor: '#d1d5db',     // 经典未激活波形灰
+                    progressColor: '#ff9800', // Gradio 经典主色橙色
+                    cursorColor: 'transparent',
+                    height: 38,
+                    barWidth: 2,
+                    barGap: 1.5,
+                    barRadius: 1,
+                    normalize: true,
+                    backend: 'WebAudio'
+                });
+
+                ws.load(src);
+                waveSurferRef.current = ws;
+
+                ws.on('play', () => setIsPlaying(true));
+                ws.on('pause', () => setIsPlaying(false));
+                ws.on('timeupdate', (time) => setCurrentTime(formatTime(time)));
+                ws.on('ready', (dur) => {
+                    setDuration(formatTime(dur));
+                    setCurrentTime('0:00');
+                });
+
+                return () => {
+                    ws.destroy();
+                };
+            }, [src]);
+
+            const handlePlayPause = () => {
+                if (waveSurferRef.current) {
+                    waveSurferRef.current.playPause();
+                }
+            };
+
+            const handleMute = () => {
+                if (waveSurferRef.current) {
+                    const muteState = !isMuted;
+                    waveSurferRef.current.setMuted(muteState);
+                    setIsMuted(muteState);
+                }
+            };
+
+            return (
+                <div className="gr-input-wrapper bg-gray-50/30 p-3 space-y-2">
+                    <div className="flex justify-between items-center">
+                        <span className="gr-label">{label}</span>
+                        {filename && (
+                            <span className="text-[10px] font-mono text-gray-400 max-w-[500px] truncate" title={filename}>
+                                {filename}
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="flex items-center gap-3 bg-white border border-gray-100 rounded-lg p-2 shadow-sm">
+                        {/* 播放/暂停 */}
+                        <button
+                            onClick={handlePlayPause}
+                            type="button"
+                            className="h-8 w-8 flex items-center justify-center rounded-full bg-orange-50 hover:bg-orange-100 text-orange-600 transition"
+                        >
+                            {isPlaying ? (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+                                    <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+                                </svg>
+                            ) : (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="ml-0.5">
+                                    <polygon points="6 3 20 12 6 21 6 3"></polygon>
+                                </svg>
+                            )}
+                        </button>
+
+                        {/* 波形画布 */}
+                        <div ref={containerRef} className="flex-1 min-w-0 pointer-events-auto"></div>
+
+                        {/* 时码 */}
+                        <span className="text-[10px] font-mono text-gray-500 whitespace-nowrap min-w-[60px] text-right">
+                            {currentTime} / {duration}
+                        </span>
+
+                        {/* 静音控制 */}
+                        <button
+                            onClick={handleMute}
+                            type="button"
+                            className="text-gray-400 hover:text-gray-600 transition p-1"
+                        >
+                            {isMuted ? (
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                    <path d="M9 9v6a3 3 0 0 0 3 3h1.586l4.707 4.707A1 1 0 0 0 20 22V4a1 1 0 0 0-1.707-.707L13.586 8H12a3 3 0 0 0-3 3z"></path>
+                                </svg>
+                            ) : (
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                                </svg>
+                            )}
+                        </button>
+
+                        {/* 额外下载 */}
+                        {onDownload && (
+                            <button
+                                onClick={onDownload}
+                                type="button"
+                                className="text-gray-400 hover:text-orange-500 transition p-1"
+                                title="下载音频"
+                            >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        function AudioGenerationUI() {
+            // Tab 状态: 'tts' ("TTS + SVC") 和 'svc' ("音色转换")
+            const [activeTab, setActiveTab] = useState('tts');
+
+            const [options, setOptions] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            // TTS Form States
+            const [selectedLanguage, setSelectedLanguage] = usePersistedState('selectedLanguage', '');
+            const [selectedModel, setSelectedModel] = usePersistedState('selectedModel', '');
+            const [selectedReference, setSelectedReference] = usePersistedState('selectedReference', '');
+            const [enableSvc, setEnableSvc] = usePersistedState('enableSvc', true);
+            const [selectedSvcType, setSelectedSvcType] = usePersistedState('selectedSvcType', '');
+            const [selectedSvcModel, setSelectedSvcModel] = usePersistedState('selectedSvcModel', '');
+            const [outputPrefix, setOutputPrefix] = usePersistedState('outputPrefix', '');
+
+            const [toneShift, setToneShift] = usePersistedState('toneShift', 0);
+            const [rvcIndexRate, setRvcIndexRate] = usePersistedState('rvcIndexRate', 0.0);
+            const [runningInfo, setRunningInfo] = useState('TTS服务可用');
+
+            const [genTexts, setGenTexts] = useState('');
+            const [refText, setRefText] = usePersistedState('refText', '');
+            const [removeSilence, setRemoveSilence] = usePersistedState('removeSilence', false);
+            const [saveLineAudio, setSaveLineAudio] = usePersistedState('saveLineAudio', false);
+            // const [cbNoRef, setCbNoRef] = usePersistedState('cbNoRef', false);
+            const [preGenText, setPreGenText] = usePersistedState('preGenText', '');
+            const [cutLength, setCutLength] = usePersistedState('cutLength', 0.0);
+
+            const [randomizeSeed, setRandomizeSeed] = usePersistedState('randomizeSeed', true);
+            const [seed, setSeed] = usePersistedState('seed', 0);
+            const [stylePrompt, setStylePrompt] = usePersistedState('stylePrompt', '');
+            const [nfeStep, setNfeStep] = usePersistedState('nfeStep', 32);
+            const [crossFadeDuration, setCrossFadeDuration] = usePersistedState('crossFadeDuration', 1.3);
+
+            // 自定义参考音频扩展状态
+            const [customRefAudioFile, setCustomRefAudioFile] = useState(null);
+            const [customRefAudioPath, setCustomRefAudioPath] = useState('');
+            const [customRefText, setCustomRefText] = useState('');
+            // const [uploadingRefAudio, setUploadingRefAudio] = useState(false);
+
+            // TTS 任务执行状态
+            const [sessionId, setSessionId] = useState('');
+            const [generating, setGenerating] = useState(false);
+            const [taskStatus, setTaskStatus] = useState(null);
+            const [fileList, setFileList] = useState(null);
+            const [pollInterval, setPollInterval] = useState(null);
+            const [taskInfo, setTaskInfo] = useState("暂无生成文件，请在右侧输入数量并获取最近生成的音频。");
+
+            // 最近提取状态
+            const [numList, setNumList] = useState('1');
+
+            // 音色转换 (SVC Tab) 状态
+            const [convertLanguage, setConvertLanguage] = useState('');
+            const [convertSvcType, setConvertSvcType] = useState('');
+            const [convertSvcModel, setConvertSvcModel] = useState('');
+            const [convertToneShift, setConvertToneShift] = useState(0);
+            const [convertRvcIndexRate, setConvertRvcIndexRate] = useState(0);
+
+            const [convertFiles, setConvertFiles] = useState([]); // { filename, path, size, status }
+            const [converting, setConverting] = useState(false);
+            const [convertSessionId, setConvertSessionId] = useState('');
+            const [convertTaskStatus, setConvertTaskStatus] = useState(null);
+            const [convertFileList, setConvertFileList] = useState(null);
+
+            // Accordion 状态
+            const [accordionOpen, setAccordionOpen] = useState(false);
+
+            // Filtered options
+            const [filteredModels, setFilteredModels] = useState([]);
+            const [filteredSvcModels, setFilteredSvcModels] = useState([]);
+            const [filteredReferences, setFilteredReferences] = useState([]);
+
+            const [isOptionsUpdate, setIsOptionsUpdate] = useState(0);
+
+            // SVC Tab Filtered models
+            const [svcTabFilteredModels, setSvcTabFilteredModels] = useState([]);
+
+            // 初始化获取可选项
+            useEffect(() => {
+                fetchOptions();
+                const urlParams = new URLSearchParams(window.location.search);
+                const sessionParam = urlParams.get('session');
+                if (sessionParam) {
+                    setSessionId(sessionParam);
+                    loadSessionStatus(sessionParam);
+                }
+            }, []);
+
+            // 全局服务器状态及任务轮询逻辑（定时器联动接口）
+            useEffect(() => {
+                const interval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/api/global-status`);
+                        const data = await response.json();
+                        if (data && data.status !== 'idle') {
+                            setRunningInfo(`TTS服务使用中 - ${data.task_name} ${data.completed_step}${data.progress}%`);
+                        } else {
+                            setRunningInfo('TTS服务可用');
+                        }
+                    } catch (error) {
+                        console.error('获取服务器状态失败:', error);
+                    }
+                }, 1000); // 1秒更新一次状态以对齐原 gr.Timer(1)
+                return () => clearInterval(interval);
+            }, []);
+
+            // 选项获取
+            const fetchOptions = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/options`);
+                    const data = await response.json();
+                    setIsOptionsUpdate(0)
+                    setOptions(data);
+                    
+                    if (data.languages && data.languages.length > 0) {
+                        const defLang = data.languages[0].name;
+                        if (selectedLanguage === "") {
+                            setSelectedLanguage(defLang);
+                            setConvertLanguage(defLang);
+                        }
+                    }
+                    setLoading(false);
+                } catch (error) {
+                    console.error('获取系统可选项失败:', error);
+                    setLoading(false);
+                }
+            };
+
+            // 监听语言改变进行联动 (TTS Tab)
+            useEffect(() => {
+                if (options && selectedLanguage) {
+                    const langName = options.languages.find(l => l.name === selectedLanguage)?.name || selectedLanguage;
+                    // 过滤模型
+                    const models = options.models.filter(m => m.languages.includes(langName))
+                        .sort((a, b) => a.display_name.localeCompare(b.display_name));
+                    setFilteredModels(models);
+                    if (models.length > 0) {
+                        if (isOptionsUpdate > 0 || selectedModel === "") {
+                            setSelectedModel(models[0].name);
+                        }   
+                    } else {
+                        setSelectedModel('');
+                    }
+
+                    // 过滤参考音频
+                    const refs = options.references.filter(r => r.language === langName)
+                        .sort((a, b) => a.name.localeCompare(b.name));
+                    setFilteredReferences(refs);
+                    if (refs.length > 0) {
+                        if(isOptionsUpdate > 0  || selectedReference === "") {
+                            setSelectedReference(refs[0].name);
+                            setRefText(refs[0].text);
+                        }
+                    } else {
+                        setSelectedReference('');
+                        setRefText('');
+                    }
+
+                    // 过滤SVC类型与模型
+                    const hasSovits = options.svc_models.some(m => m.language === langName && m.type === 'sovits');
+                    const hasRvc = options.svc_models.some(m => m.language === langName && m.type === 'rvc');
+
+                    let defSvcType = '';
+                    if (hasSovits) defSvcType = 'sovits';
+                    else if (hasRvc) defSvcType = 'rvc';
+                    if(isOptionsUpdate > 0  || selectedSvcType === "") {
+                        setSelectedSvcType(defSvcType);
+                    }
+                    setIsOptionsUpdate(isOptionsUpdate + 1)
+                }
+            }, [selectedLanguage, options]);
+
+            // 监听语言改变进行联动 (SVC Tab)
+            useEffect(() => {
+                if (options && convertLanguage) {
+                    const langName = options.languages.find(l => l.name === convertLanguage)?.name || convertLanguage;
+                    const hasSovits = options.svc_models.some(m => m.language === langName && m.type === 'sovits');
+                    const hasRvc = options.svc_models.some(m => m.language === langName && m.type === 'rvc');
+
+                    let defSvcType = '';
+                    if (hasSovits) defSvcType = 'sovits';
+                    else if (hasRvc) defSvcType = 'rvc';
+                    setConvertSvcType(defSvcType);
+                }
+            }, [convertLanguage, options]);
+
+            // 根据选定类型过滤SVC模型 (TTS Tab)
+            useEffect(() => {
+                if (options && selectedLanguage && selectedSvcType) {
+                    const langName = options.languages.find(l => l.name === selectedLanguage)?.name || selectedLanguage;
+                    const list = options.svc_models
+                        .filter(m => m.language === langName && m.type.toLowerCase() === selectedSvcType.toLowerCase())
+                        .sort((a, b) => a.display_name.localeCompare(b.display_name));
+                    setFilteredSvcModels(list);
+                    if (list.length > 0) {
+                        if(isOptionsUpdate > 0  || selectedSvcModel === "") {
+                            setSelectedSvcModel(list[0].name);
+                        }
+                    } else {
+                        setSelectedSvcModel('');
+                    }
+                } else {
+                    if(isOptionsUpdate > 0) {
+                        setFilteredSvcModels([]);
+                        setSelectedSvcModel('');
+                    }
+                }
+                setIsOptionsUpdate(isOptionsUpdate + 1)
+            }, [selectedLanguage, selectedSvcType, options]);
+
+            // 根据选定类型过滤SVC模型 (SVC Tab)
+            useEffect(() => {
+                if (options && convertLanguage && convertSvcType) {
+                    const langName = options.languages.find(l => l.name === convertLanguage)?.name || convertLanguage;
+                    const list = options.svc_models
+                        .filter(m => m.language === langName && m.type.toLowerCase() === convertSvcType.toLowerCase())
+                        .sort((a, b) => a.display_name.localeCompare(b.display_name));
+                    setSvcTabFilteredModels(list);
+                    if (list.length > 0) {
+                        setConvertSvcModel(list[0].name);
+                    } else {
+                        setConvertSvcModel('');
+                    }
+                } else {
+                    setSvcTabFilteredModels([]);
+                    setConvertSvcModel('');
+                }
+            }, [convertLanguage, convertSvcType, options]);
+
+            // 加载会话历史状态
+            const loadSessionStatus = async (sid) => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/task/${sid}/progress`);
+                    const data = await response.json();
+                    setTaskStatus(data);
+                    if (data.status === 'processing' || data.status === 'pending' || data.status === 'running') {
+                        setGenerating(true);
+                    } else if (data.status === 'completed') {
+                        loadFileList(sid);
+                    }
+                } catch (error) {
+                    console.error('载入会话状态失败:', error);
+                }
+            };
+
+            const loadFileList = async (sid) => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/task/${sid}/files`);
+                    const data = await response.json();
+                    setFileList(data);
+                } catch (error) {
+                    console.error('获取音频列表失败:', error);
+                }
+            };
+
+            // 轮询 TTS
+            useEffect(() => {
+                if (sessionId && generating) {
+                    const interval = setInterval(async () => {
+                        try {
+                            const response = await fetch(`${API_BASE_URL}/api/task/${sessionId}/progress`);
+                            const data = await response.json();
+                            setTaskStatus(data);
+                            if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+                                setGenerating(false);
+                                if (data.status === 'completed') {
+                                    loadFileList(sessionId);
+                                    setTaskInfo("生成完成。");
+                                }
+                                else if(data.status === 'failed') {
+                                    alert(data.error_message || '生成失败');
+                                    setTaskInfo("生成失败");
+                                }
+                                else if(data.status === 'cancelled') {
+                                    // alert('任务取消');
+                                    setTaskInfo("任务取消");
+                                }
+                            }
+                        } catch (error) {
+                            console.error('轮询接口故障:', error);
+                        }
+                    }, 2000);
+                    setPollInterval(interval);
+                    return () => clearInterval(interval);
+                } else if (pollInterval) {
+                    clearInterval(pollInterval);
+                    setPollInterval(null);
+                }
+            }, [sessionId, generating]);
+
+            // 轮询 SVC Tab
+            useEffect(() => {
+                let interval = null;
+                if (convertSessionId && converting) {
+                    interval = setInterval(async () => {
+                        try {
+                            const response = await fetch(`${API_BASE_URL}/api/task/${convertSessionId}/progress`);
+                            const data = await response.json();
+                            setConvertTaskStatus(data);
+                            if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+                                setConverting(false);
+                                if (data.status === 'completed') {
+                                    const filesResponse = await fetch(`${API_BASE_URL}/api/task/${convertSessionId}/files`);
+                                    const filesData = await filesResponse.json();
+                                    setConvertFileList(filesData);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('轮询SVC转换任务出错:', error);
+                        }
+                    }, 2000);
+                }
+                return () => {
+                    if (interval) clearInterval(interval);
+                };
+            }, [convertSessionId, converting]);
+
+            // 参考音频上传逻辑
+            const uploadCustomRefAudio = async (file) => {
+                setUploadingRefAudio(true);
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    if (!response.ok) throw new Error('上传接口返回非200');
+                    const data = await response.json();
+                    setCustomRefAudioPath(data.relative_path);
+                    setCustomRefAudioFile(file);
+                } catch (error) {
+                    console.error('参考音频上传出错:', error);
+                    alert('参考音频上传失败，请重新选择！');
+                    setCustomRefAudioFile(null);
+                    setCustomRefAudioPath('');
+                } finally {
+                    setUploadingRefAudio(false);
+                }
+            };
+
+            // 音色转换音频文件上传
+            const uploadConvertAudios = async (files) => {
+                const filesArray = Array.from(files);
+                const items = filesArray.map(f => ({
+                    filename: f.name,
+                    status: 'uploading',
+                    file: f,
+                    path: ''
+                }));
+                setConvertFiles(prev => [...prev, ...items]);
+
+                for (let item of items) {
+                    const formData = new FormData();
+                    formData.append('file', item.file);
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/api/upload`, {
+                            method: 'POST',
+                            body: formData
+                        });
+                        const data = await response.json();
+                        setConvertFiles(prev => prev.map(f => f.file === item.file ? {
+                            ...f,
+                            status: 'ready',
+                            path: data.relative_path,
+                            size: item.file.size
+                        } : f));
+                    } catch (error) {
+                        console.error('待转换音频上传出错:', error);
+                        setConvertFiles(prev => prev.map(f => f.file === item.file ? { ...f, status: 'failed' } : f));
+                    }
+                }
+            };
+
+            // 导入上一次分行生成的音频到音色转换列表
+            const fillLastSegmAudios = async () => {
+                if (!sessionId) {
+                    alert('未找到上一次合成的 Session，请先在合成面板生成音频，或者手动上传待转换音频！');
+                    return;
+                }
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/task/${sessionId}/files`);
+                    if (!response.ok) {
+                        alert('获取上次生成的音频文件列表失败！');
+                        return;
+                    }
+                    const data = await response.json();
+                    const segmFiles = data.files.filter(f => f.filename.startsWith('segm_audio'));
+                    if (segmFiles.length === 0) {
+                        alert('上次生成的任务中没有分段中间音频（请检查是否在高级设置中勾选了“按行保存音频”）。');
+                        return;
+                    }
+
+                    const loadedFiles = segmFiles.map(file => ({
+                        filename: file.filename,
+                        path: `gen_audio/${sessionId}/${file.filename}`,
+                        size: file.size,
+                        status: 'ready'
+                    }));
+
+                    setConvertFiles(prev => {
+                        const existPaths = prev.map(p => p.path);
+                        const filtered = loadedFiles.filter(item => !existPaths.includes(item.path));
+                        return [...prev, ...filtered];
+                    });
+                } catch (error) {
+                    console.error('填充分段音频故障:', error);
+                    alert('导入分段音频异常。');
+                }
+            };
+
+            // 发起合成调用
+            const executeTts = async () => {
+                const requestData = {
+                    ref_audio_orig: selectedReference,
+                    ref_text: refText,
+                    gen_texts: genTexts,
+                    language: selectedLanguage,
+                    model_name: selectedModel,
+                    gen_title: outputPrefix,
+                    remove_silence: removeSilence,
+                    seed: randomizeSeed ? -1 : seed,
+                    cross_fade_duration: Number.isFinite(parseFloat(crossFadeDuration)) ? parseFloat(crossFadeDuration) : 0.15,
+                    nfe_step: parseInt(nfeStep) || 10,
+                    style_prompt: stylePrompt,
+                    save_line_audio: saveLineAudio,
+                    enable_svc: enableSvc,
+                    svc_type: selectedSvcType,
+                    svc_model: selectedSvcModel,
+                    tone_shift: parseInt(toneShift) || 0,
+                    rvc_index_rate: parseFloat(rvcIndexRate) || 0
+                };
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/generate-audio`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestData)
+                    });
+
+                    if (response.status === 503) {
+                        const errorData = await response.json();
+                        alert(errorData.detail || '服务繁忙，请稍后重试');
+                        setGenerating(false);
+                        return;
+                    }
+                    setGenerating(true);
+                    setFileList(null);
+                    setTaskStatus(null);
+                    setTaskInfo("生成中……");
+
+                    const data = await response.json();
+                    setSessionId(data.session_id);
+
+                    // 动态更新网址 url 参数
+                    const url = new URL(window.location);
+                    url.searchParams.set('session', data.session_id);
+                    window.history.pushState({}, '', url);
+
+                    if (data.seed) {
+                        setSeed(parseInt(data.seed));
+                    }
+                } catch (error) {
+                    console.error('一键合成出问题:', error);
+                    setGenerating(false);
+                }
+            };
+
+            // 取消生成任务
+            const cancelTask = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/task/${sessionId}/cancel`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setTaskInfo(data.message)
+                    }
+                } catch (e) {
+                    console.error(e);
+                    setTaskInfo(data.detail)
+                }
+            };
+
+            // 发起转换调用
+            const executeSvcConvert = async () => {
+                const readyItems = convertFiles.filter(f => f.status === 'ready');
+                if (readyItems.length === 0) {
+                    alert('请先添加转换音频！');
+                    return;
+                }
+                if (!convertLanguage || !convertSvcModel) {
+                    alert('请选择转换语言与音色模型！');
+                    return;
+                }
+
+                const requestData = {
+                    audios: readyItems.map(f => f.path),
+                    language: convertLanguage,
+                    svc_type: convertSvcType,
+                    svc_model: convertSvcModel,
+                    tone_shift: parseInt(convertToneShift) || 0,
+                    rvc_index_rate: parseFloat(convertRvcIndexRate) || 0
+                };
+
+                try {
+                    setConverting(true);
+                    setConvertFileList(null);
+                    setConvertTaskStatus(null);
+
+                    const response = await fetch(`${API_BASE_URL}/api/convert-audio`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestData)
+                    });
+
+                    if (response.status === 503) {
+                        const errorData = await response.json();
+                        alert(errorData.detail || '服务器忙，请稍候重试！');
+                        setConverting(false);
+                        return;
+                    }
+
+                    const data = await response.json();
+                    setConvertSessionId(data.session_id);
+                } catch (error) {
+                    console.error('音色转换发起故障:', error);
+                    setConverting(false);
+                }
+            };
+
+            // 最近音频提取
+            const getRecentAudios = async () => {
+                if (!numList) return;
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/files-history?num=${numList}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setFileList(data);
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const copyUrlWithSession = () => {
+                const url = new URL(window.location);
+                url.searchParams.set('session', sessionId);
+                navigator.clipboard.writeText(url.toString());
+                alert('链接已复制到剪贴板!');
+            };
+
+            const newUrlSession = () => {
+                window.open(window.location.origin + window.location.pathname, '_blank');
+            };
+            
+            // 复刻 gradio 的 "下载所有输出音频" 原版点击行为
+            const downloadAllOutputs = async (componentLabel) => {
+                const downloadList = componentLabel === '下载文件' ? fileList?.files : convertFileList?.files;
+                // const sid = componentLabel === '下载文件' ? sessionId : convertSessionId;
+                if (downloadList && downloadList.length > 0) {
+                    for (const file of downloadList) {
+                        const resp = await fetch(`${API_BASE_URL}/api/task/${file.session_id}/download?filename=${encodeURIComponent(file.filename)}`);
+                        const blob = await resp.blob();
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = file.filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    }
+                }
+            };
+
+            const downloadAudio = async (filename, session_id) => {
+                const resp = await fetch(`${API_BASE_URL}/api/task/${session_id}/download?filename=${encodeURIComponent(filename)}`);
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+
+            if (loading) {
+                return (
+                    <div className="flex items-center justify-center min-h-[300px] text-gray-500 font-medium">
+                        加载系统参数中...
+                    </div>
+                );
+            }
+
+            return (
+                <div className="w-full py-2 space-y-2">
+
+                    {/* 自定义 TTS + SVC 标题 */}
+                    <div className="flex flex-wrap gap-6 items-center justify-between mb-6">
+                        <h1 className="text-2xl font-bold text-gray-800">自定义 TTS + SVC</h1>
+                        {sessionId && (
+                            <div className="flex flex-wrap items-center gap-6">
+                                <button
+                                    onClick={newUrlSession}
+                                    className="flex items-center gap- px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+                                >
+                                    <Plus />
+                                    新建会话链接
+                                </button>
+                                <button
+                                    onClick={copyUrlWithSession}
+                                    className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+                                >
+                                    <Copy />
+                                    复制会话链接
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Tabs 结构导航 */}
+                    {/* <div className="flex border-b border-gray-200 text-sm font-medium">
+                        <button
+                            onClick={() => setActiveTab('tts')}
+                            className={`px-4 py-2.5 gr-tab-btn ${activeTab === 'tts' ? 'active' : 'text-gray-500 hover:text-gray-700'}`}
+                        >
+                            TTS + SVC
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('svc')}
+                            className={`px-4 py-2.5 gr-tab-btn ${activeTab === 'svc' ? 'active' : 'text-gray-500 hover:text-gray-700'}`}
+                        >
+                            音色转换
+                        </button>
+                    </div> */}
+
+                    {/* Tab 1: TTS + SVC */}
+                    {activeTab === 'tts' && (
+                        <div className="space-y-4">
+
+                            {/* Row 1: 语言, 模型, 参考音频 */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">语言</span>
+                                    <select
+                                        value={selectedLanguage}
+                                        onChange={(e) => setSelectedLanguage(e.target.value)}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                    >
+                                        {options?.languages?.map(l => (
+                                            <option key={l.code} value={l.name}>{l.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">模型</span>
+                                    <select
+                                        value={selectedModel}
+                                        onChange={(e) => setSelectedModel(e.target.value)}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                    >
+                                        <option value="">请选择底座模型</option>
+                                        {filteredModels.map(m => (
+                                            <option key={m.name} value={m.name}>{m.display_name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">参考音频</span>
+                                    <select
+                                        value={selectedReference}
+                                        onChange={(e) => {
+                                            setSelectedReference(e.target.value);
+                                            const ref = filteredReferences.find(r => r.name === e.target.value);
+                                            if (ref) {
+                                                setRefText(ref.text);
+                                                // setCustomRefAudioFile(null);
+                                                // setCustomRefAudioPath('');
+                                            }
+                                        }}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                    >
+                                        <option value="">请选择参考音频</option>
+                                        {filteredReferences.map(r => (
+                                            <option key={r.name} value={r.name}>{r.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Row 2: 启用音频转换, 音频转换音色选择 (svc_type), 音频转换音色选择 (svc_model) */}
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                                <div className="gr-input-wrapper flex flex-col justify-center md:col-span-2">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={enableSvc}
+                                            onChange={(e) => setEnableSvc(e.target.checked)}
+                                            className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
+                                        />
+                                        <span className="text-sm font-semibold text-gray-700">启用音频转换</span>
+                                    </label>
+                                    <span className="gr-info">勾选此项，启动音频转换。</span>
+                                </div>
+
+                                <div className="gr-input-wrapper md:col-span-3">
+                                    <span className="gr-label">音频转换音色选择</span>
+                                    <select
+                                        value={selectedSvcType}
+                                        onChange={(e) => setSelectedSvcType(e.target.value)}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                    >
+                                        <option value="">选择SVC类型</option>
+                                        {options?.svc_types.map(t => (
+                                            <option key={t} value={t}>{t}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="gr-input-wrapper md:col-span-4">
+                                    <span className="gr-label">音频转换音色选择</span>
+                                    <select
+                                        value={selectedSvcModel}
+                                        onChange={(e) => setSelectedSvcModel(e.target.value)}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                    >
+                                        <option value="">请选择音色模型</option>
+                                        {filteredSvcModels.map(m => (
+                                            <option key={m.name} value={m.name}>{m.display_name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="gr-input-wrapper md:col-span-3">
+                                    <span className="gr-label">输出音频前缀</span>
+                                    <input type="text" value={outputPrefix} onChange={(e) => setOutputPrefix(e.target.value)} className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white" />
+                                </div>
+                            </div>
+
+                            {/* Row 3: 音调调整, 语搜索特征比率, 状态运行状态展示 */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="gr-input-wrapper md:col-span-1">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <div>
+                                            <span className="gr-label">音调调整(往左调整偏男声，往右调整偏女声)</span>
+                                        </div>
+                                        <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                            <input
+                                                type="number"
+                                                min="-12"
+                                                max="12"
+                                                value={toneShift}
+                                                onChange={(e) => {
+                                                    const valStr = e.target.value;
+                                                    if (valStr === '' || valStr === '-') {
+                                                        setToneShift(valStr);
+                                                        return;
+                                                    }
+                                                    let val = parseInt(valStr);
+                                                    if (!isNaN(val)) {
+                                                        setToneShift(Math.max(-12, Math.min(12, val)));
+                                                    }
+                                                }}
+                                                className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setToneShift(0)}
+                                                className="px-2 bg-gray-50 hover:bg-gray-100 text-gray-500 h-full flex items-center justify-center transition"
+                                                title="重置为默认值"
+                                            >
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span className="text-xs text-gray-400 font-mono">-12</span>
+                                        <input
+                                            type="range"
+                                            min="-12"
+                                            max="12"
+                                            step="1"
+                                            value={toneShift}
+                                            onChange={(e) => setToneShift(parseInt(e.target.value))}
+                                            className="w-full flex-1"
+                                        />
+                                        <span className="text-xs text-gray-400 font-mono">12</span>
+                                    </div>
+                                </div>
+                                
+                                {/* VoxCPM2 style-control prompt */}
+                                <div className="gr-input-wrapper md:col-span-1">
+                                    <span className="gr-label">提示词</span>
+                                    <textarea
+                                        value={stylePrompt}
+                                        onChange={(e) => setStylePrompt(e.target.value)}
+                                        rows={3}
+                                        maxLength={500}
+                                        className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white resize-none"
+                                        placeholder="例如：稍快一点，情绪欢快，语气自然"
+                                    />
+                                    <span className="gr-info">VoxCPM2 风格控制：可描述情绪、语气、节奏等。</span>
+                                </div>
+
+                                <div className="gr-input-wrapper md:col-span-1 flex flex-row items-center justify-center gap-2">
+                                    <span className={`w-6 h-6 rounded-full block flex-shrink-0 ${generating ? 'bg-blue-500' : 'bg-green-500'}`}></span>
+                                    <input
+                                        type="text"
+                                        readOnly
+                                        value={runningInfo}
+                                        className="w-full bg-transparent text-sm text-left font-bold text-gray-700 py-1"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Row 4: 生成文本 (lines=8) 与 右侧操作按钮 */}
+                            <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-stretch">
+                                <div className="gr-input-wrapper md:col-span-4 flex flex-col">
+                                    <span className="gr-label">生成文本:</span>
+                                    <textarea
+                                        value={genTexts}
+                                        onChange={(e) => setGenTexts(e.target.value)}
+                                        rows={10}
+                                        className="gr-input flex-1 resize-none focus:outline-none"
+                                        placeholder="要合成的目标文字内容..."
+                                    />
+                                </div>
+                                <div className="flex flex-col gap-3 md:col-span-1 justify-between">
+                                    <button
+                                        onClick={() => setGenTexts('')}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                    >
+                                        清空文本框
+                                    </button>
+                                    <button
+                                        onClick={executeTts}
+                                        disabled={generating || (!selectedReference && !customRefAudioPath) || (!refText && !customRefText) || !genTexts}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                    >
+                                        {generating ? "生成中..." : "合成"}
+                                    </button>
+                                    <button
+                                        onClick={cancelTask}
+                                        disabled={!generating || (!selectedReference && !customRefAudioPath) || (!refText && !customRefText) || !genTexts}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                    >
+                                        取消生成
+                                    </button>
+                                    <button
+                                        onClick={() => downloadAllOutputs('下载文件')}
+                                        disabled={!fileList || fileList.files.length === 0}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                    >
+                                        下载所有输出音频
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 音频输出播放框 */}
+                            {fileList && fileList.last_file && (
+                                <AudioWaveformPlayer
+                                    src={`${API_BASE_URL}/api/task/${sessionId}/download?filename=${encodeURIComponent(fileList.last_file.filename)}`}
+                                    label="合成音频"
+                                    filename={fileList.last_file.filename}
+                                    onDownload={() => downloadAudio(fileList.last_file.filename, sessionId)}
+                                />
+                            )}
+
+                            {/* Accordion: 高级设置 */}
+                            <div className="gr-block overflow-hidden">
+                                <button
+                                    onClick={() => setAccordionOpen(!accordionOpen)}
+                                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-100 transition"
+                                >
+                                    <span>高级设置</span>
+                                    <span>{accordionOpen ? '▼' : '▶'}</span>
+                                </button>
+
+                                {accordionOpen && (
+                                    <div className="p-4 space-y-4 bg-white">
+                                        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                                            <div className="gr-input-wrapper md:col-span-2 justify-center">
+                                                <span className="gr-label">参考音频对应文本</span>
+                                                <textarea
+                                                    value={refText}
+                                                    onChange={(e) => setRefText(e.target.value)}
+                                                    rows={2}
+                                                    className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                                />
+                                            </div>
+                                            <div className="gr-input-wrapper md:col-span-2 justify-center">
+                                                <span className="gr-label">前置生成文本</span>
+                                                <textarea
+                                                    value={preGenText}
+                                                    onChange={(e) => setPreGenText(e.target.value)}
+                                                    rows={2}
+                                                    className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                                />
+                                            </div>
+                                            <div className="gr-input-wrapper md:col-span-1 flex flex-col justify-center">
+                                                <span className="gr-label">截取前置音频长度(秒)</span>
+                                                <input type="number" value={cutLength} onChange={(e) => setCutLength(parseFloat(e.target.value) || 0)} className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white" />
+                                            </div>
+                                        </div>
+
+                                        {/* Row 6: 随机种子、删除静音、按行保存音频 */}
+                                        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                                            <div className="gr-input-wrapper flex flex-col justify-center">
+                                                <label className="flex items-center gap-2 cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={randomizeSeed}
+                                                        onChange={(e) => setRandomizeSeed(e.target.checked)}
+                                                        className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
+                                                    />
+                                                    <span className="text-xs font-semibold text-gray-700">随机种子</span>
+                                                </label>
+                                                <span className="gr-info">勾选此项，每次会自动生成随机值</span>
+                                            </div>
+
+                                            <div className="gr-input-wrapper flex items-center">
+                                                <input
+                                                    type="number"
+                                                    disabled={randomizeSeed}
+                                                    value={seed}
+                                                    onChange={(e) => setSeed(parseInt(e.target.value))}
+                                                    className="gr-input text-center font-bold"
+                                                />
+                                            </div>
+
+                                            <div className="gr-input-wrapper flex flex-col justify-center">
+                                                <label className="flex items-center gap-2 cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={removeSilence}
+                                                        onChange={(e) => setRemoveSilence(e.target.checked)}
+                                                        className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
+                                                    />
+                                                    <span className="text-xs font-semibold text-gray-700">删除静音</span>
+                                                </label>
+                                                <span className="gr-info">模型会自动生成静音，尤其是短音频，通过此选项可以移除静音。</span>
+                                            </div>
+
+                                            <div className="gr-input-wrapper flex flex-col justify-center">
+                                                <label className="flex items-center gap-2 cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={saveLineAudio}
+                                                        onChange={(e) => setSaveLineAudio(e.target.checked)}
+                                                        className="w-4 h-4 text-orange-500 accent-orange-500 rounded"
+                                                    />
+                                                    <span className="text-xs font-semibold text-gray-700">按行保存音频</span>
+                                                </label>
+                                                <span className="gr-info">勾选此项，中间结果会每行保存一个音频，不勾选，则每一个文本框保存一个音频。</span>
+                                            </div>
+
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                            {/* Slider 1: RVC索引值 */}
+                                            <div className="gr-input-wrapper">
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <div>
+                                                        <span className="gr-label">RVC搜索特征比率</span>
+                                                    </div>
+                                                    <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            max="1"
+                                                            step="0.01"
+                                                            value={rvcIndexRate}
+                                                            disabled={selectedSvcType !== 'RVC'}
+                                                            onChange={(e) => {
+                                                                const valStr = e.target.value;
+                                                                if (valStr === '' || valStr === '-' || valStr === '.' || valStr.endsWith('.')) {
+                                                                    setRvcIndexRate(valStr);
+                                                                    return;
+                                                                }
+                                                                let val = parseFloat(valStr);
+                                                                if (!isNaN(val)) {
+                                                                    setRvcIndexRate(Math.max(0, Math.min(1, val)));
+                                                                }
+                                                            }}
+                                                            className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            disabled={selectedSvcType !== 'RVC'}
+                                                            onClick={() => setRvcIndexRate(0)}
+                                                            className="px-2 bg-gray-50 hover:bg-gray-100 disabled:bg-gray-100 text-gray-500 disabled:text-gray-300 h-full flex items-center justify-center transition"
+                                                            title="重置为默认值"
+                                                        >
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2 mt-1">
+                                                    <span className="text-xs text-gray-400 font-mono">0.00</span>
+                                                    <input
+                                                        type="range"
+                                                        min="0"
+                                                        max="1"
+                                                        step="0.01"
+                                                        value={rvcIndexRate}
+                                                        onChange={(e) => setRvcIndexRate(parseFloat(e.target.value))}
+                                                        className="w-full flex-1"
+                                                        disabled={selectedSvcType !== 'RVC'}
+                                                    />
+                                                    <span className="text-xs text-gray-400 font-mono">1.00</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Slider 2: NFE Steps */}
+                                            <div className="gr-input-wrapper">
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <div>
+                                                        <span className="gr-label">VoxCPM 推理步数</span>
+                                                        <span className="gr-info">步数越高越慢；推荐从 10 开始。</span>
+                                                    </div>
+                                                    <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                                        <input
+                                                            type="number"
+                                                            min="4"
+                                                            max="64"
+                                                            step="2"
+                                                            value={nfeStep}
+                                                            onChange={(e) => {
+                                                                const valStr = e.target.value;
+                                                                if (valStr === '' || valStr === '-') {
+                                                                    setNfeStep(valStr);
+                                                                    return;
+                                                                }
+                                                                let val = parseInt(valStr);
+                                                                if (!isNaN(val)) {
+                                                                    setNfeStep(Math.max(4, Math.min(64, val)));
+                                                                }
+                                                            }}
+                                                            className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setNfeStep(10)}
+                                                            className="px-2 bg-gray-50 hover:bg-gray-100 text-gray-500 h-full flex items-center justify-center transition"
+                                                            title="重置为默认值"
+                                                        >
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2 mt-1">
+                                                    <span className="text-xs text-gray-400 font-mono">4</span>
+                                                    <input
+                                                        type="range"
+                                                        min="4"
+                                                        max="64"
+                                                        step="2"
+                                                        value={nfeStep}
+                                                        onChange={(e) => setNfeStep(parseInt(e.target.value))}
+                                                        className="w-full flex-1"
+                                                    />
+                                                    <span className="text-xs text-gray-400 font-mono">64</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Slider 3: Cross-Fade Duration (s) */}
+                                            <div className="gr-input-wrapper">
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <div>
+                                                        <span className="gr-label">分段间静音长度（秒）</span>
+                                                        <span className="gr-info">设置两个片段之前的静音时长</span>
+                                                    </div>
+                                                    <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                                        <input
+                                                            type="number"
+                                                            min="0.0"
+                                                            max="5.0"
+                                                            step="0.01"
+                                                            value={crossFadeDuration}
+                                                            onChange={(e) => {
+                                                                const valStr = e.target.value;
+                                                                if (valStr === '' || valStr === '-' || valStr === '.' || valStr.endsWith('.')) {
+                                                                    setCrossFadeDuration(valStr);
+                                                                    return;
+                                                                }
+                                                                let val = parseFloat(valStr);
+                                                                if (!isNaN(val)) {
+                                                                    setCrossFadeDuration(Math.max(0.0, Math.min(5.0, val)));
+                                                                }
+                                                            }}
+                                                            className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCrossFadeDuration(1.3)}
+                                                            className="px-2 bg-gray-50 hover:bg-gray-100 text-gray-500 h-full flex items-center justify-center transition"
+                                                            title="重置为默认值"
+                                                        >
+                                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2 mt-1">
+                                                    <span className="text-xs text-gray-400 font-mono">0.0</span>
+                                                    <input
+                                                        type="range"
+                                                        min="0.0"
+                                                        max="5.0"
+                                                        step="0.01"
+                                                        value={crossFadeDuration}
+                                                        onChange={(e) => setCrossFadeDuration(parseFloat(e.target.value))}
+                                                        className="w-full flex-1"
+                                                    />
+                                                    <span className="text-xs text-gray-400 font-mono">5.0</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 文件列表与最近生成获取栏左右分栏布局 */}
+                            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-6">
+                                {/* Left side: 完整文件列表 */}
+                                <div className="lg:col-span-3">
+                                    {fileList && fileList.files && fileList.files.length > 0 ? (
+                                        <div className="gr-block p-4">
+                                            <h3 className="text-lg font-semibold text-gray-700 mb-3">完整文件列表</h3>
+                                            <div className="space-y-2">
+                                                {fileList.files.map((file, idx) => (
+                                                    <div key={idx} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                                                        <div className="flex-1 mr-4 flex justify-between items-center">
+                                                            <p className="text-sm font-medium text-gray-700">{file.filename}</p>
+                                                            <p className="text-xs text-gray-500 text-right">大小: {(file.size / 1024).toFixed(2)} KB | 创建时间: {file.created_at}</p>
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            <button
+                                                                onClick={() => downloadAudio(file.filename, file.session_id)}
+                                                                type="button"
+                                                                className="flex items-center gap-2 px-3 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 transition text-sm whitespace-nowrap"
+                                                                title="下载音频"
+                                                            >
+                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col items-center justify-center min-h-[120px] border border-dashed border-gray-200 rounded-lg text-sm text-gray-400 gap-2">
+                                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-300">
+                                                <circle cx="12" cy="12" r="10"></circle>
+                                                <line x1="12" y1="16" x2="12" y2="12"></line>
+                                                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                                            </svg>
+                                            <p className="text-center">{taskInfo}</p>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Right side: 最近生成获取栏 */}
+                                <div className="lg:col-span-1 flex flex-col justify-start gap-2">
+                                    <h3 className="text-lg font-semibold text-gray-700 mb-1">获取最近生成</h3>
+                                    <div className="flex flex-col gap-2">
+                                        <button
+                                            onClick={getRecentAudios}
+                                            className="gr-button-primary w-full py-2.5 text-sm rounded-lg font-bold"
+                                        >
+                                            获取最近音频
+                                        </button>
+                                        <div className="gr-input-wrapper w-full">
+                                            <span className="gr-label">获取数量</span>
+                                            <input
+                                                type="number"
+                                                value={numList}
+                                                onChange={(e) => setNumList(e.target.value)}
+                                                className="w-full border border-gray-300 rounded px-2 py-1 text-center font-bold text-gray-800 bg-white focus:border-orange-500 focus:outline-none text-sm"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Tab 2: 音色转换 */}
+                    {activeTab === 'svc' && (
+                        <div className="space-y-4">
+
+                            {/* Row 1: 语言, 音频转换音色选择 (svc_type), 音频转换音色选择 (svc_model) */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">语言</span>
+                                    <select
+                                        value={convertLanguage}
+                                        onChange={(e) => setConvertLanguage(e.target.value)}
+                                        className="gr-input"
+                                    >
+                                        {options?.languages?.map(l => (
+                                            <option key={l.code} value={l.name}>{l.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">音频转换音色选择</span>
+                                    <select
+                                        value={convertSvcType}
+                                        onChange={(e) => setConvertSvcType(e.target.value)}
+                                        className="gr-input"
+                                    >
+                                        <option value="">选择SVC类型</option>
+                                        {options?.svc_types.map(t => (
+                                            <option key={t} value={t}>{t}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="gr-input-wrapper">
+                                    <span className="gr-label">音频转换音色选择</span>
+                                    <select
+                                        value={convertSvcModel}
+                                        onChange={(e) => setConvertSvcModel(e.target.value)}
+                                        className="gr-input"
+                                    >
+                                        <option value="">请选择音色模型</option>
+                                        {svcTabFilteredModels.map(m => (
+                                            <option key={m.name} value={m.name}>{m.display_name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Row 2: 音调调整, 语搜索特征比率 */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="gr-input-wrapper">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <div>
+                                            <span className="gr-label">音调调整</span>
+                                            <span className="gr-info">音调偏移</span>
+                                        </div>
+                                        <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                            <input
+                                                type="number"
+                                                min="-12"
+                                                max="12"
+                                                value={convertToneShift}
+                                                onChange={(e) => {
+                                                    const valStr = e.target.value;
+                                                    if (valStr === '' || valStr === '-') {
+                                                        setConvertToneShift(valStr);
+                                                        return;
+                                                    }
+                                                    let val = parseInt(valStr);
+                                                    if (!isNaN(val)) {
+                                                        setConvertToneShift(Math.max(-12, Math.min(12, val)));
+                                                    }
+                                                }}
+                                                className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setConvertToneShift(0)}
+                                                className="px-2 bg-gray-50 hover:bg-gray-100 text-gray-500 h-full flex items-center justify-center transition"
+                                                title="重置为默认值"
+                                            >
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span className="text-xs text-gray-400 font-mono">-12</span>
+                                        <input
+                                            type="range"
+                                            min="-12"
+                                            max="12"
+                                            step="1"
+                                            value={convertToneShift}
+                                            onChange={(e) => setConvertToneShift(parseInt(e.target.value))}
+                                            className="w-full flex-1"
+                                        />
+                                        <span className="text-xs text-gray-400 font-mono">12</span>
+                                    </div>
+                                </div>
+
+                                <div className="gr-input-wrapper">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <div>
+                                            <span className="gr-label">语搜索特征比率</span>
+                                            <span className="gr-info">索引文件施加的影响;值越高，影响越大。但是，选择较低的值有助于减少音频中存在的伪影。</span>
+                                        </div>
+                                        <div className="flex items-center border border-gray-300 rounded overflow-hidden h-7 bg-white">
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="1"
+                                                step="0.01"
+                                                value={convertRvcIndexRate}
+                                                disabled={convertSvcType !== 'RVC'}
+                                                onChange={(e) => {
+                                                    const valStr = e.target.value;
+                                                    if (valStr === '' || valStr === '-' || valStr === '.' || valStr.endsWith('.')) {
+                                                        setConvertRvcIndexRate(valStr);
+                                                        return;
+                                                    }
+                                                    let val = parseFloat(valStr);
+                                                    if (!isNaN(val)) {
+                                                        setConvertRvcIndexRate(Math.max(0, Math.min(1, val)));
+                                                    }
+                                                }}
+                                                className="w-12 text-center text-xs font-semibold focus:outline-none h-full border-r border-gray-300 bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                                            />
+                                            <button
+                                                type="button"
+                                                disabled={convertSvcType !== 'RVC'}
+                                                onClick={() => setConvertRvcIndexRate(0)}
+                                                className="px-2 bg-gray-50 hover:bg-gray-100 disabled:bg-gray-100 text-gray-500 disabled:text-gray-300 h-full flex items-center justify-center transition"
+                                                title="重置为默认值"
+                                            >
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span className="text-xs text-gray-400 font-mono">0.00</span>
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="1"
+                                            step="0.01"
+                                            value={convertRvcIndexRate}
+                                            onChange={(e) => setConvertRvcIndexRate(parseFloat(e.target.value))}
+                                            className="w-full flex-1"
+                                            disabled={convertSvcType !== 'RVC'}
+                                        />
+                                        <span className="text-xs text-gray-400 font-mono">1.00</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Row 3: 转换音频 (左), 输出音频 (右) */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+                                {/* 转换音频上传区 */}
+                                <div className="gr-block p-4 space-y-3">
+                                    <span className="gr-label">转换音频</span>
+                                    <div
+                                        onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-orange-500'); }}
+                                        onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('border-orange-500'); }}
+                                        onDrop={async (e) => {
+                                            e.preventDefault();
+                                            e.currentTarget.classList.remove('border-orange-500');
+                                            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                                                await uploadConvertAudios(e.dataTransfer.files);
+                                            }
+                                        }}
+                                        onClick={() => document.getElementById('svcTabFilesInput').click()}
+                                        className="border-2 border-dashed border-gray-200 rounded-lg p-6 text-center cursor-pointer hover:border-orange-400 bg-gray-50/50"
+                                    >
+                                        <input
+                                            type="file"
+                                            id="svcTabFilesInput"
+                                            accept="audio/*"
+                                            multiple
+                                            onChange={async (e) => {
+                                                if (e.target.files && e.target.files.length > 0) {
+                                                    await uploadConvertAudios(e.target.files);
+                                                }
+                                            }}
+                                            className="hidden"
+                                        />
+                                        <p className="text-xs font-semibold text-gray-500">拖拽多个音频到此，或点击上传</p>
+                                    </div>
+
+                                    {/* 待转换文件列表 */}
+                                    {convertFiles.length > 0 && (
+                                        <div className="border border-gray-100 rounded-lg max-h-40 overflow-y-auto divide-y divide-gray-100 bg-white">
+                                            {convertFiles.map((file, idx) => (
+                                                <div key={idx} className="flex justify-between items-center p-2.5 text-[11px] font-medium text-gray-700">
+                                                    <span className="truncate mr-4 flex-1">{file.filename}</span>
+                                                    {file.status === 'uploading' && <span className="text-orange-500 animate-pulse font-bold">上传中...</span>}
+                                                    {file.status === 'ready' && <span className="text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded">就绪</span>}
+                                                    {file.status === 'failed' && <span className="text-rose-500 font-bold">失败</span>}
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setConvertFiles(prev => prev.filter((_, i) => i !== idx));
+                                                        }}
+                                                        className="text-gray-400 hover:text-rose-500 px-1 ml-2"
+                                                    >
+                                                        &times;
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 输出音频结果列表 */}
+                                <div className="gr-block p-4 space-y-3">
+                                    <span className="gr-label">输出音频</span>
+                                    {convertFileList && convertFileList.files && convertFileList.files.length > 0 ? (
+                                        <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                                            {convertFileList.files.map((file, idx) => (
+                                                <AudioWaveformPlayer
+                                                    key={idx}
+                                                    src={`${API_BASE_URL}/api/task/${convertSessionId}/download?filename=${encodeURIComponent(file.filename)}`}
+                                                    label={file.filename}
+                                                    filename={null}
+                                                    onDownload={() => downloadAudio(file.filename, convertSessionId)}
+                                                />
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center justify-center h-28 border border-gray-100 rounded-lg text-xs text-gray-400 font-medium">
+                                            暂无已转换音频
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Row 4: 转换, 填充分段音频, 下载所有输出音频 */}
+                            <div className="grid grid-cols-3 gap-4 items-center">
+                                <button
+                                    onClick={executeSvcConvert}
+                                    disabled={converting || convertFiles.filter(f => f.status === 'ready').length === 0 || !convertLanguage || !convertSvcModel}
+                                    className="gr-button-primary py-3 text-sm rounded-lg"
+                                >
+                                    {converting ? "转换中..." : "转换"}
+                                </button>
+                                <button
+                                    onClick={fillLastSegmAudios}
+                                    className="gr-button-primary py-3 text-sm rounded-lg"
+                                >
+                                    填充分段音频
+                                </button>
+                                <button
+                                    onClick={() => downloadAllOutputs('输出音频')}
+                                    disabled={!convertFileList || convertFileList.files.length === 0}
+                                    className="gr-button-primary py-3 text-sm rounded-lg"
+                                >
+                                    下载所有输出音频
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.render(<AudioGenerationUI />, document.getElementById('root'));
+    </script>
+</body>
+
+</html>
