@@ -332,7 +332,9 @@
             const [customRefAudioFile, setCustomRefAudioFile] = useState(null);
             const [customRefAudioPath, setCustomRefAudioPath] = useState('');
             const [customRefText, setCustomRefText] = useState('');
-            // const [uploadingRefAudio, setUploadingRefAudio] = useState(false);
+            const [uploadingRefAudio, setUploadingRefAudio] = useState(false);
+            const [savingReference, setSavingReference] = useState(false);
+            const [deletingReference, setDeletingReference] = useState(false);
 
             // TTS 任务执行状态
             const [sessionId, setSessionId] = useState('');
@@ -615,10 +617,12 @@
             // 参考音频上传逻辑
             const uploadCustomRefAudio = async (file) => {
                 setUploadingRefAudio(true);
+                setCustomRefAudioPath('');
                 const formData = new FormData();
                 formData.append('file', file);
+                formData.append('language', selectedLanguage);
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/upload`, {
+                    const response = await fetch(`${API_BASE_URL}/api/upload-reference`, {
                         method: 'POST',
                         body: formData
                     });
@@ -633,6 +637,73 @@
                     setCustomRefAudioPath('');
                 } finally {
                     setUploadingRefAudio(false);
+                }
+            };
+
+            const saveCustomReference = async () => {
+                if (!customRefAudioPath || !customRefText.trim()) {
+                    alert('请先上传参考音频并填写参考文本！');
+                    return;
+                }
+                setSavingReference(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/reference/save`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            language: selectedLanguage,
+                            relative_path: customRefAudioPath,
+                            reference_text: customRefText,
+                            original_filename: customRefAudioFile?.name || ''
+                        })
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '保存失败');
+                    setCustomRefAudioPath(data.relative_path);
+                    setSelectedReference(data.name);
+                    setRefText(data.reference_text);
+                    await fetchOptions();
+                    alert('参考音频和文本已保存。');
+                } catch (error) {
+                    console.error('保存参考音频出错:', error);
+                    alert(error.message || '保存参考音频失败，请重试！');
+                } finally {
+                    setSavingReference(false);
+                }
+            };
+
+            const deleteCustomReference = async () => {
+                const referenceToDelete = customRefAudioPath || selectedReference;
+                if (!referenceToDelete) {
+                    alert('请先选择要删除的参考音频。');
+                    return;
+                }
+                if (!window.confirm('确定删除当前参考音频及其参考文本吗？')) return;
+
+                setDeletingReference(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/reference/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            language: selectedLanguage,
+                            relative_path: referenceToDelete
+                        })
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '删除失败');
+                    setCustomRefAudioFile(null);
+                    setCustomRefAudioPath('');
+                    setCustomRefText('');
+                    setSelectedReference('');
+                    setRefText('');
+                    await fetchOptions();
+                    alert(data.message);
+                } catch (error) {
+                    console.error('删除参考音频出错:', error);
+                    alert(error.message || '删除参考音频失败，请重试！');
+                } finally {
+                    setDeletingReference(false);
                 }
             };
 
@@ -708,9 +779,10 @@
 
             // 发起合成调用
             const executeTts = async () => {
+                const useCustomReference = Boolean(customRefAudioPath && customRefText.trim());
                 const requestData = {
-                    ref_audio_orig: selectedReference,
-                    ref_text: refText,
+                    ref_audio_orig: useCustomReference ? customRefAudioPath : selectedReference,
+                    ref_text: useCustomReference ? customRefText.trim() : refText,
                     gen_texts: genTexts,
                     language: selectedLanguage,
                     model_name: selectedModel,
@@ -915,6 +987,10 @@
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
             };
+
+            const hasCustomReference = Boolean(customRefAudioPath && customRefText.trim());
+            const hasDefaultReference = Boolean(selectedReference && refText.trim());
+            const canGenerate = !generating && !uploadingRefAudio && Boolean(genTexts.trim()) && (hasCustomReference || hasDefaultReference);
 
             if (loading) {
                 return (
@@ -1149,7 +1225,8 @@
 
                             {/* Row 4: 生成文本 (lines=8) 与 右侧操作按钮 */}
                             <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-stretch">
-                                <div className="gr-input-wrapper md:col-span-4 flex flex-col">
+                                <div className="space-y-3 md:col-span-4">
+                                    <div className="gr-input-wrapper flex flex-col">
                                     <span className="gr-label">生成文本:</span>
                                     <textarea
                                         value={genTexts}
@@ -1158,35 +1235,83 @@
                                         className="gr-input flex-1 resize-none focus:outline-none"
                                         placeholder="要合成的目标文字内容..."
                                     />
-                                </div>
-                                <div className="flex flex-col gap-3 md:col-span-1 justify-between">
+                                    </div>
+                                    <div className="flex flex-row flex-nowrap gap-3">
                                     <button
                                         onClick={() => setGenTexts('')}
-                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold whitespace-nowrap"
                                     >
                                         清空文本框
                                     </button>
                                     <button
                                         onClick={executeTts}
-                                        disabled={generating || (!selectedReference && !customRefAudioPath) || (!refText && !customRefText) || !genTexts}
-                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                        disabled={!canGenerate}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold whitespace-nowrap"
                                     >
                                         {generating ? "生成中..." : "合成"}
                                     </button>
                                     <button
                                         onClick={cancelTask}
-                                        disabled={!generating || (!selectedReference && !customRefAudioPath) || (!refText && !customRefText) || !genTexts}
-                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                        disabled={!generating}
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold whitespace-nowrap"
                                     >
                                         取消生成
                                     </button>
                                     <button
                                         onClick={() => downloadAllOutputs('下载文件')}
                                         disabled={!fileList || fileList.files.length === 0}
-                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold"
+                                        className="gr-button-primary py-3 text-sm rounded-lg flex-1 flex items-center justify-center font-bold whitespace-nowrap"
                                     >
                                         下载所有输出音频
                                     </button>
+                                    </div>
+                                </div>
+                                <div className="flex flex-col gap-3 md:col-span-1">
+                                    <div className="gr-input-wrapper flex flex-col">
+                                        <span className="gr-label">上传音频</span>
+                                        <input
+                                            type="file"
+                                            accept="audio/*"
+                                            onChange={(e) => {
+                                                const file = e.target.files?.[0];
+                                                if (file) {
+                                                    uploadCustomRefAudio(file);
+                                                } else {
+                                                    setCustomRefAudioFile(null);
+                                                    setCustomRefAudioPath('');
+                                                }
+                                            }}
+                                            disabled={uploadingRefAudio}
+                                            className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                        />
+                                        <span className="gr-info mt-1">{uploadingRefAudio ? '音频上传中...' : customRefAudioFile ? `已选择：${customRefAudioFile.name}` : '上传音频与参考文本同时填写时将优先使用它们。'}</span>
+                                    </div>
+                                    <div className="gr-input-wrapper flex flex-col">
+                                        <span className="gr-label">参考文本</span>
+                                        <input
+                                            type="text"
+                                            value={customRefText}
+                                            onChange={(e) => setCustomRefText(e.target.value)}
+                                            className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                            placeholder="输入参考文本..."
+                                        />
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={saveCustomReference}
+                                            disabled={!customRefAudioPath || !customRefText.trim() || uploadingRefAudio || savingReference || deletingReference}
+                                            className="gr-button-primary py-2 text-sm rounded-lg flex-1 font-bold whitespace-nowrap"
+                                        >
+                                            {savingReference ? '保存中...' : '持久保存'}
+                                        </button>
+                                        <button
+                                            onClick={deleteCustomReference}
+                                            disabled={uploadingRefAudio || savingReference || deletingReference}
+                                            className="gr-button-primary py-2 text-sm rounded-lg flex-1 font-bold whitespace-nowrap"
+                                        >
+                                            {deletingReference ? '删除中...' : '删除参考音频'}
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
@@ -1783,7 +1908,7 @@
                                     disabled={!convertFileList || convertFileList.files.length === 0}
                                     className="gr-button-primary py-3 text-sm rounded-lg"
                                 >
-                                    下载所有输出音频
+                                    下载所有音频
                                 </button>
                             </div>
                         </div>

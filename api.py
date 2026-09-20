@@ -39,7 +39,7 @@ import re
 import shutil
 import time
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +57,7 @@ VOXCPM_MODEL_ID = os.environ.get("VOXCPM_MODEL_ID", "openbmb/VoxCPM2")
 VOXCPM_MODEL_NAME = os.environ.get("VOXCPM_MODEL_NAME", "VoxCPM2")
 VOXCPM_MODEL_DIR = Path(os.environ.get("VOXCPM_MODEL_DIR", str(BASE_DIR / "pretrained_model")))
 VOXCPM_LORA_DIRS = (BASE_DIR / "lora_models", VOXCPM_MODEL_DIR / "lora")
+SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac"}
 # torch.compile/Inductor requires a Triton version matched to the installed
 # PyTorch build. Keep it disabled by default for deployment compatibility.
 VOXCPM_OPTIMIZE = os.environ.get("VOXCPM_OPTIMIZE", "false").strip().lower() in {"1", "true", "yes"}
@@ -299,6 +300,18 @@ class AudioGenerationRequest(BaseModel):
     svc_model: str = Field(default="", description="SVC模型")
     tone_shift: int = Field(default=0, description="音调偏移")
     rvc_index_rate: float = Field(default=0.8, description="RVC索引率")
+
+
+class SaveReferenceRequest(BaseModel):
+    language: str
+    relative_path: str
+    reference_text: str
+    original_filename: str = ""
+
+
+class DeleteReferenceRequest(BaseModel):
+    language: str
+    relative_path: str
 
 
 class GlobalTaskStatus(BaseModel) :
@@ -604,8 +617,9 @@ class AudioGenerationTask:
         from voxcpm_postprocess import concatenate_with_silence, rvc_convert_audio, sovits_convert_audio
 
         request = self.request_data
-        ref_path = BASE_DIR / "refs" / request.language / request.ref_audio_orig
-        if not ref_path.is_file():
+        ref_directory = (BASE_DIR / "refs" / request.language).resolve()
+        ref_path = (ref_directory / request.ref_audio_orig).resolve()
+        if ref_directory not in ref_path.parents or not ref_path.is_file():
             raise FileNotFoundError("缺少参考音频")
         if not request.ref_text.strip():
             raise ValueError("极致克隆必须提供与参考音频完全一致的参考文本")
@@ -1092,7 +1106,7 @@ def _get_available_options() :
             continue
 
         for audio_file in language_path.iterdir() :
-            if audio_file.suffix == '.wav' and audio_file.with_suffix('.txt').is_file() :
+            if audio_file.suffix.lower() in SUPPORTED_AUDIO_SUFFIXES and audio_file.with_suffix('.txt').is_file() :
                 references.append({
                     'name': audio_file.name,
                     'language': language_path.name,
@@ -1154,6 +1168,99 @@ async def get_global_status():
         }
 
     return GlobalTaskStatus(**current_status)
+
+
+@app.post("/api/upload-reference")
+async def upload_reference_audio(
+    file: UploadFile = File(...),
+    language: str = Form(...),
+):
+    """Store a user-supplied reference audio file under its selected language."""
+    available_languages = {item["name"] for item in _get_available_options()["languages"]}
+    if language not in available_languages:
+        raise HTTPException(status_code=400, detail=f"不支持的语言: {language}")
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in SUPPORTED_AUDIO_SUFFIXES:
+        raise HTTPException(status_code=400, detail="仅支持常见音频格式")
+
+    max_upload_size = 100 * 1024 * 1024
+    content = await file.read(max_upload_size + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="上传的音频为空")
+    if len(content) > max_upload_size:
+        raise HTTPException(status_code=413, detail="参考音频不能超过 100 MB")
+
+    upload_directory = BASE_DIR / "refs" / language / ".uploads"
+    upload_directory.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}{suffix}"
+    (upload_directory / filename).write_bytes(content)
+    return {"relative_path": f".uploads/{filename}"}
+
+
+def _resolve_user_reference_path(language: str, relative_path: str) -> tuple[Path, Path, Path]:
+    """Resolve a custom reference path and ensure it remains in its language directory."""
+    available_languages = {item["name"] for item in _get_available_options()["languages"]}
+    if language not in available_languages:
+        raise HTTPException(status_code=400, detail=f"不支持的语言: {language}")
+    reference_directory = (BASE_DIR / "refs" / language).resolve()
+    upload_directory = (reference_directory / ".uploads").resolve()
+    candidate = (reference_directory / relative_path).resolve()
+    if reference_directory not in candidate.parents:
+        raise HTTPException(status_code=400, detail="无效的参考音频路径")
+    return reference_directory, upload_directory, candidate
+
+
+@app.post("/api/reference/save")
+async def save_reference_audio(request: SaveReferenceRequest):
+    """Persist a temporary uploaded reference audio and its matching text."""
+    if not request.reference_text.strip():
+        raise HTTPException(status_code=400, detail="请填写参考文本后再保存")
+
+    reference_directory, upload_directory, source = _resolve_user_reference_path(
+        request.language, request.relative_path
+    )
+    if upload_directory not in source.parents or not source.is_file():
+        raise HTTPException(status_code=404, detail="未找到待保存的上传参考音频")
+
+    stem = Path(request.original_filename).stem or source.stem
+    safe_stem = re.sub(r"[^\w.-]+", "_", stem, flags=re.UNICODE).strip("._") or "reference"
+    destination = reference_directory / f"{safe_stem}{source.suffix.lower()}"
+    number = 2
+    while destination.exists() or destination.with_suffix(".txt").exists():
+        destination = reference_directory / f"{safe_stem}_{number}{source.suffix.lower()}"
+        number += 1
+
+    source.replace(destination)
+    destination.with_suffix(".txt").write_text(request.reference_text.strip(), encoding="utf-8")
+    destination.with_name(f"{destination.name}.user-upload").write_text("", encoding="utf-8")
+    return {
+        "relative_path": destination.name,
+        "name": destination.name,
+        "reference_text": request.reference_text.strip(),
+    }
+
+
+@app.post("/api/reference/delete")
+async def delete_reference_audio(request: DeleteReferenceRequest):
+    """Delete only a user-uploaded custom reference and its matching text."""
+    reference_directory, upload_directory, audio_path = _resolve_user_reference_path(
+        request.language, request.relative_path
+    )
+    marker_path = audio_path.with_name(f"{audio_path.name}.user-upload")
+    is_temporary_upload = upload_directory in audio_path.parents
+    if not is_temporary_upload and not marker_path.is_file():
+        raise HTTPException(status_code=403, detail="只能删除当前上传的参考音频")
+    if not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="未找到参考音频")
+
+    audio_path.unlink()
+    text_path = audio_path.with_suffix(".txt")
+    if text_path.is_file():
+        text_path.unlink()
+    if marker_path.is_file():
+        marker_path.unlink()
+    return {"message": "参考音频及对应文本已删除"}
 
 
 @app.post("/api/generate-audio", response_model=TaskResponse)

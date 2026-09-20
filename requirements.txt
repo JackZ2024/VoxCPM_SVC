@@ -10,6 +10,7 @@ torchaudio>=2.5.0
 # Web API and persistence
 fastapi
 uvicorn[standard]
+python-multipart
 pydantic>=2.10,<3
 sqlalchemy
 
@@ -35,4 +36,3 @@ matplotlib
 
 # RVC runtime
 transformers
-
