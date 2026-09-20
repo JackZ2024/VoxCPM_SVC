@@ -344,6 +344,7 @@
 
             // 最近提取状态
             const [numList, setNumList] = useState('1');
+            const [downloadingZip, setDownloadingZip] = useState(false);
 
             // 音色转换 (SVC Tab) 状态
             const [convertLanguage, setConvertLanguage] = useState('');
@@ -833,6 +834,41 @@
                     }
                 } catch (e) {
                     console.error(e);
+                }
+            };
+
+            const downloadRecentAudiosZip = async () => {
+                const files = fileList?.files || [];
+                if (files.length === 0 || downloadingZip) return;
+
+                setDownloadingZip(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/audio-files/download-zip`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(files.map(({ filename, session_id }) => ({ filename, session_id }))),
+                    });
+                    if (!response.ok) {
+                        const error = await response.json().catch(() => ({}));
+                        throw new Error(error.detail || '打包下载失败，请稍后重试。');
+                    }
+
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    const disposition = response.headers.get('Content-Disposition') || '';
+                    const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || 'recent_audios.zip';
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                } catch (error) {
+                    console.error('打包下载失败:', error);
+                    alert(error.message || '打包下载失败，请稍后重试。');
+                } finally {
+                    setDownloadingZip(false);
                 }
             };
 
@@ -1381,7 +1417,7 @@
                                                         />
                                                         <button
                                                             type="button"
-                                                            onClick={() => setCrossFadeDuration(1.3)}
+                                                            onClick={() => setCrossFadeDuration(0.7)}
                                                             className="px-2 bg-gray-50 hover:bg-gray-100 text-gray-500 h-full flex items-center justify-center transition"
                                                             title="重置为默认值"
                                                         >
@@ -1464,6 +1500,13 @@
                                             className="gr-button-primary w-full py-2.5 text-sm rounded-lg font-bold"
                                         >
                                             获取最近音频
+                                        </button>
+                                        <button
+                                            onClick={downloadRecentAudiosZip}
+                                            disabled={!fileList?.files?.length || downloadingZip}
+                                            className="w-full py-2.5 text-sm rounded-lg font-bold bg-purple-600 text-white hover:bg-purple-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                                        >
+                                            {downloadingZip ? '正在打包...' : '打包下载'}
                                         </button>
                                         <div className="gr-input-wrapper w-full">
                                             <span className="gr-label">获取数量</span>

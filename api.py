@@ -21,10 +21,12 @@ TODO
 import os
 import gc
 import json
+import io
 import random
 import uuid
 import threading
 import traceback
+import zipfile
 from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Dict, Any, List, Generator
@@ -38,7 +40,7 @@ import shutil
 import time
 
 from fastapi import FastAPI, HTTPException, Query, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -341,6 +343,12 @@ class AudioFileList(BaseModel):
     files: List[AudioFile]
     last_file: Optional[AudioFile] = None
     total_count: int
+
+
+class AudioZipRequestItem(BaseModel):
+    """A file selected from the audio history list for ZIP download."""
+    filename: str
+    session_id: str
 
 
 class AvailableOptionLanguage(BaseModel):
@@ -1277,6 +1285,50 @@ async def download_audio(
         file_path,
         media_type="audio/mpeg",
         filename=filename
+    )
+
+
+@app.post("/api/audio-files/download-zip")
+async def download_audio_zip(files: List[AudioZipRequestItem]):
+    """Package the audio files currently shown in the history list into a ZIP."""
+    if not files:
+        raise HTTPException(status_code=400, detail="请先获取至少一个音频文件")
+
+    archive = io.BytesIO()
+    used_names = set()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for item in files:
+            task = task_manager.get_task(item.session_id)
+            if not task or task.status != TaskStatus.COMPLETED:
+                continue
+
+            file_path = next(
+                (path for path in task.result_files if os.path.basename(path) == item.filename),
+                None,
+            )
+            if not file_path and task.last_file and os.path.basename(task.last_file) == item.filename:
+                file_path = task.last_file
+            if not file_path or not os.path.isfile(file_path):
+                continue
+
+            archive_name = os.path.basename(file_path)
+            stem, extension = os.path.splitext(archive_name)
+            suffix = 2
+            while archive_name in used_names:
+                archive_name = f"{stem}_{suffix}{extension}"
+                suffix += 1
+            used_names.add(archive_name)
+            zip_file.write(file_path, arcname=archive_name)
+
+    if not used_names:
+        raise HTTPException(status_code=404, detail="所选音频文件已不存在或暂不可下载")
+
+    archive.seek(0)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="recent_audios_{timestamp}.zip"'},
     )
 
 
