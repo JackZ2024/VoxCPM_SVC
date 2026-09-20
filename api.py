@@ -285,7 +285,7 @@ class TaskStatus(Enum):
 class AudioGenerationRequest(BaseModel):
     """音频生成请求模型"""
     ref_audio_orig: str = Field(..., description="参考音频原始文件")
-    ref_text: str = Field(..., description="参考文本")
+    ref_text: str = Field(default="", description="参考文本（仅 HIFI 模式需要）")
     gen_texts: str = Field(..., description="要生成的文本")
     language: str = Field(..., description="语言")
     model_name: str = Field(..., description="模型名称")
@@ -294,6 +294,7 @@ class AudioGenerationRequest(BaseModel):
     cross_fade_duration: float = Field(default=0.15, ge=0, le=10, description="相邻分段间的静音长度（秒）")
     nfe_step: int = Field(default=10, ge=1, le=100, description="VoxCPM扩散推理步数")
     style_prompt: str = Field(default="", max_length=500, description="VoxCPM2 风格控制提示词")
+    enable_hifi: bool = Field(default=False, description="启用高保真克隆模式")
     save_line_audio: bool = Field(default=False, description="保存分行音频")
     enable_svc: bool = Field(default=True, description="启用SVC")
     svc_type: str = Field(default="", description="SVC类型")
@@ -621,8 +622,8 @@ class AudioGenerationTask:
         ref_path = (ref_directory / request.ref_audio_orig).resolve()
         if ref_directory not in ref_path.parents or not ref_path.is_file():
             raise FileNotFoundError("缺少参考音频")
-        if not request.ref_text.strip():
-            raise ValueError("极致克隆必须提供与参考音频完全一致的参考文本")
+        if request.enable_hifi and not request.ref_text.strip():
+            raise ValueError("HIFI 模式必须提供与参考音频完全一致的参考文本")
 
         seed = request.seed if 0 <= request.seed <= 2**31 - 1 else int(np.random.randint(0, 2**31 - 1))
         self.used_seed = seed
@@ -657,15 +658,25 @@ class AudioGenerationTask:
                 return "", []
             self.completed_step = f"{index}/{len(texts)}"
             
-            styled_text = f"({request.style_prompt.strip()}){text}" if request.style_prompt.strip() else text
-            generate_args = dict(
-                text=styled_text,
-                prompt_wav_path=str(ref_path),
-                prompt_text=request.ref_text,
-                inference_timesteps=request.nfe_step,
-                denoise=False,
-            )
-            generate_args["reference_wav_path"] = str(ref_path)
+            if request.enable_hifi:
+                # HIFI uses the matching transcript and reference audio for
+                # high-fidelity cloning. Style prompts do not apply in this mode.
+                generate_args = dict(
+                    text=text,
+                    prompt_wav_path=str(ref_path),
+                    prompt_text=request.ref_text.strip(),
+                    reference_wav_path=str(ref_path),
+                    inference_timesteps=request.nfe_step,
+                    denoise=False,
+                )
+            else:
+                styled_text = f"({request.style_prompt.strip()}){text}" if request.style_prompt.strip() else text
+                generate_args = dict(
+                    text=styled_text,
+                    reference_wav_path=str(ref_path),
+                    inference_timesteps=request.nfe_step,
+                    denoise=False,
+                )
             wave = model.generate(**generate_args)
             wave = np.asarray(wave, dtype=np.float32)
             if enable_svc:
