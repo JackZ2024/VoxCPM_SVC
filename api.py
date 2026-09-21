@@ -706,8 +706,8 @@ class AudioGenerationTask:
             f_version = "0"
         if enable_svc:
             pre_name = "svc_audio"
-            svc_type_str = request.svc_type.lower().lower()[0]
-            s_version_str = str(s_version) + "-"
+            svc_type_str = "-" + request.svc_type.lower().lower()[0]
+            s_version_str = str(s_version)
 
         gen_title = request.gen_title
         if request.save_line_audio:
@@ -716,16 +716,16 @@ class AudioGenerationTask:
                 if gen_title != "":
                     audio_filepath = output_dir / f"{gen_title}-{i}.wav"
                 else:
-                    audio_filepath = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}_{i}.wav"
+                    audio_filepath = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}_{i}.wav"
                 sf.write(audio_filepath, audio_wave, sample_rate, 'PCM_24')
                 output_audio_list.append(str(audio_filepath))
             final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
             if gen_title != "":
                 last_gen_audio_path = output_dir / f"{gen_title}.mp3"
             else:
-                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.mp3"
+                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.mp3"
             
-            print(final_waves)
+            # print(final_waves)
             # 如果是 float32/float64，范围通常是 [-1, 1]
             audio_int16 = (final_waves * 32767).astype(np.int16)
             audio = AudioSegment(
@@ -742,8 +742,8 @@ class AudioGenerationTask:
                 last_gen_audio_path = output_dir / f"{gen_title}.mp3"
                 gen_audio_path = output_dir / f"{gen_title}.wav"
             else:
-                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.mp3"
-                gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}-{svc_type_str}{s_version_str}.wav"
+                last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.mp3"
+                gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.wav"
             final_waves = None
             if len(generated_waves) > 0:
                 final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
