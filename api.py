@@ -1,21 +1,7 @@
 # -*- coding: utf-8 -*-
 
-"""VoxCPM 极致克隆 API 服务端。
-
-TODO
-后端
-    - [x] 添加标题，加入文件命名规则
-    - [x] 提供查询历史记录的界面
-    - [x] 会话历史存入数据库，定时清理旧会话
-    - [ ] 兼容中文版
-
-前端
-    - [ ] 兼容中文版
-    - [x] 添加标题，加入文件命名规则
-    - [x] 提供查询历史记录的界面
-    - [x] 只显示 svc 音频下载
-    - [x] 显示音频波形图
-    - [x] 选择语言后自动选择其他选项的默认值
+"""
+VoxCPM 语音克隆 API 服务端。
 """
 
 import os
@@ -27,15 +13,13 @@ import uuid
 import threading
 import traceback
 import zipfile
+import subprocess
 from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Dict, Any, List, Generator
 from datetime import datetime, timezone
 from pathlib import Path
-# from sys import exit
-# from typing import Any, Generator
 import re
-# import json
 import shutil
 import time
 
@@ -247,6 +231,32 @@ def safe_audio_stem(value: str, fallback: str) -> str:
     return stem[:120]
 
 
+def apply_audio_tempo(audio_path: Path, tempo: float) -> None:
+    """Apply a lossless tempo change in place with FFmpeg's atempo filter."""
+    if abs(tempo - 1.0) < 1e-6:
+        return
+    temporary_path = audio_path.with_name(f"{audio_path.stem}.atempo.tmp{audio_path.suffix}")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(audio_path), "-filter:a", f"atempo={tempo:.6g}",
+                "-c:a", "pcm_s24le", str(temporary_path),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        temporary_path.replace(audio_path)
+    except FileNotFoundError as error:
+        raise RuntimeError("未找到 FFmpeg，无法调整音频语速") from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.decode("utf-8", errors="replace") if error.stderr else ""
+        detail = stderr.strip().splitlines()[-1] if stderr else "未知 FFmpeg 错误"
+        raise RuntimeError(f"FFmpeg 调整语速失败：{detail}") from error
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def format_file_created_at(stat_result: os.stat_result) -> str:
     """Format a file timestamp on Windows and Unix filesystems.
 
@@ -300,6 +310,7 @@ class AudioGenerationRequest(BaseModel):
     svc_type: str = Field(default="", description="SVC类型")
     svc_model: str = Field(default="", description="SVC模型")
     tone_shift: int = Field(default=0, description="音调偏移")
+    speed: float = Field(default=1.0, ge=0.8, le=1.2, description="最终输出音频语速")
     rvc_index_rate: float = Field(default=0.8, description="RVC索引率")
 
 
@@ -729,22 +740,31 @@ class AudioGenerationTask:
                 else:
                     audio_filepath = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}_{i}.wav"
                 sf.write(audio_filepath, audio_wave, output_sample_rate, 'PCM_24')
+                if abs(request.speed - 1.0) >= 1e-6:
+                    apply_audio_tempo(audio_filepath, request.speed)
                 output_audio_list.append(str(audio_filepath))
             final_waves = concatenate_with_silence(generated_waves, output_sample_rate, request.cross_fade_duration)
             if gen_title != "":
                 last_gen_audio_path = output_dir / f"{gen_title}.mp3"
+                gen_audio_path = output_dir / f"{gen_title}.wav"
             else:
                 last_gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.mp3"
-            
-            # print(final_waves)
-            # 如果是 float32/float64，范围通常是 [-1, 1]
-            audio_int16 = (final_waves * 32767).astype(np.int16)
-            audio = AudioSegment(
-                audio_int16.tobytes(),
-                frame_rate=output_sample_rate,
-                sample_width=2,  # int16 = 2 bytes
-                channels=1
-            )
+                gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.wav"
+            # When changing speed, also retain the adjusted combined WAV so the
+            # preview MP3 and at least one lossless download are identical.
+            if abs(request.speed - 1.0) >= 1e-6:
+                sf.write(gen_audio_path, final_waves, output_sample_rate, 'PCM_24')
+                apply_audio_tempo(gen_audio_path, request.speed)
+                output_audio_list.append(str(gen_audio_path))
+                audio = AudioSegment.from_wav(gen_audio_path)
+            else:
+                audio_int16 = (final_waves * 32767).astype(np.int16)
+                audio = AudioSegment(
+                    audio_int16.tobytes(),
+                    frame_rate=output_sample_rate,
+                    sample_width=2,  # int16 = 2 bytes
+                    channels=1
+                )
             audio.export(last_gen_audio_path, format="mp3", bitrate="192k")
             
         else:
@@ -761,13 +781,17 @@ class AudioGenerationTask:
                 sf.write(gen_audio_path, final_waves, output_sample_rate, 'PCM_24')
                 output_audio_list.append(str(gen_audio_path))
 
-                audio_int16 = (final_waves * 32767).astype(np.int16)
-                audio = AudioSegment(
-                    audio_int16.tobytes(),
-                    frame_rate=output_sample_rate,
-                    sample_width=2,  # int16 = 2 bytes
-                    channels=1
-                )
+                if abs(request.speed - 1.0) >= 1e-6:
+                    apply_audio_tempo(gen_audio_path, request.speed)
+                    audio = AudioSegment.from_wav(gen_audio_path)
+                else:
+                    audio_int16 = (final_waves * 32767).astype(np.int16)
+                    audio = AudioSegment(
+                        audio_int16.tobytes(),
+                        frame_rate=output_sample_rate,
+                        sample_width=2,  # int16 = 2 bytes
+                        channels=1
+                    )
                 audio.export(last_gen_audio_path, format="mp3", bitrate="192k")
 
         return str(last_gen_audio_path), output_audio_list
