@@ -650,7 +650,11 @@ class AudioGenerationTask:
             raise FileNotFoundError(f"LoRA 模型不存在：{request.model_name}")
         model = acquire_voxcpm_model(lora_dir)
         self._voxcpm_model_acquired = True
-        sample_rate = model.tts_model.sample_rate
+        # Keep the source TTS rate separate from the conversion output rate.
+        # SoVITS emits 32 kHz while VoxCPM emits 48 kHz; overwriting this value
+        # after the first line makes later source WAVs carry the wrong header.
+        source_sample_rate = model.tts_model.sample_rate
+        output_sample_rate = source_sample_rate
         generated_waves, line_labels = [], []
         for index, (line_label, text) in enumerate(texts, start=1):
             if self._stop_event.is_set():
@@ -681,13 +685,20 @@ class AudioGenerationTask:
             wave = np.asarray(wave, dtype=np.float32)
             if enable_svc:
                 intermediate = temp_dir / f"segment-{index}.wav"
-                sf.write(intermediate, wave, sample_rate, "PCM_24")
+                sf.write(intermediate, wave, source_sample_rate, "PCM_24")
                 if request.svc_type.lower() == "sovits":
-                    sample_rate, wave = sovits_convert_audio(str(intermediate), model_path, aux_path, request.tone_shift)
+                    converted_sample_rate, wave = sovits_convert_audio(str(intermediate), model_path, aux_path, request.tone_shift)
                 else:
-                    sample_rate, wave = rvc_convert_audio(str(intermediate), model_path, aux_path, request.rvc_index_rate, request.tone_shift)
+                    converted_sample_rate, wave = rvc_convert_audio(str(intermediate), model_path, aux_path, request.rvc_index_rate, request.tone_shift)
                 if wave is None:
                     raise RuntimeError("RVC 音频转换失败")
+                if index == 1:
+                    output_sample_rate = converted_sample_rate
+                elif converted_sample_rate != output_sample_rate:
+                    raise RuntimeError(
+                        f"音色转换输出采样率不一致：第 1 行为 {output_sample_rate} Hz，"
+                        f"第 {index} 行为 {converted_sample_rate} Hz"
+                    )
             generated_waves.append(np.asarray(wave, dtype=np.float32))
             line_labels.append(line_label)
             self.progress = int(index / len(texts) * 100)
@@ -717,9 +728,9 @@ class AudioGenerationTask:
                     audio_filepath = output_dir / f"{gen_title}-{i}.wav"
                 else:
                     audio_filepath = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}_{i}.wav"
-                sf.write(audio_filepath, audio_wave, sample_rate, 'PCM_24')
+                sf.write(audio_filepath, audio_wave, output_sample_rate, 'PCM_24')
                 output_audio_list.append(str(audio_filepath))
-            final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
+            final_waves = concatenate_with_silence(generated_waves, output_sample_rate, request.cross_fade_duration)
             if gen_title != "":
                 last_gen_audio_path = output_dir / f"{gen_title}.mp3"
             else:
@@ -730,7 +741,7 @@ class AudioGenerationTask:
             audio_int16 = (final_waves * 32767).astype(np.int16)
             audio = AudioSegment(
                 audio_int16.tobytes(),
-                frame_rate=sample_rate,
+                frame_rate=output_sample_rate,
                 sample_width=2,  # int16 = 2 bytes
                 channels=1
             )
@@ -746,14 +757,14 @@ class AudioGenerationTask:
                 gen_audio_path = output_dir / f"{pre_name}-{request.language }-f{f_version}{svc_type_str}{s_version_str}.wav"
             final_waves = None
             if len(generated_waves) > 0:
-                final_waves = concatenate_with_silence(generated_waves, sample_rate, request.cross_fade_duration)
-                sf.write(gen_audio_path, final_waves, sample_rate, 'PCM_24')
+                final_waves = concatenate_with_silence(generated_waves, output_sample_rate, request.cross_fade_duration)
+                sf.write(gen_audio_path, final_waves, output_sample_rate, 'PCM_24')
                 output_audio_list.append(str(gen_audio_path))
 
                 audio_int16 = (final_waves * 32767).astype(np.int16)
                 audio = AudioSegment(
                     audio_int16.tobytes(),
-                    frame_rate=sample_rate,
+                    frame_rate=output_sample_rate,
                     sample_width=2,  # int16 = 2 bytes
                     channels=1
                 )

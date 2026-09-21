@@ -22,6 +22,7 @@ librosa
 resampy
 tqdm>=4.65.0
 huggingface_hub
+wget
 
 # So-VITS-SVC runtime
 omegaconf

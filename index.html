@@ -400,7 +400,7 @@
                     } catch (error) {
                         console.error('获取服务器状态失败:', error);
                     }
-                }, 1000); // 1秒更新一次状态以对齐原 gr.Timer(1)
+                }, 2000); // 2秒更新一次状态以对齐原 gr.Timer(1)
                 return () => clearInterval(interval);
             }, []);
 
