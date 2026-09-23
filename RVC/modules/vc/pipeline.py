@@ -8,7 +8,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from functools import lru_cache
 from time import time as ttime
 
 import faiss
@@ -26,12 +25,8 @@ sys.path.append(now_dir)
 
 bh, ah = signal.butter(N=5, Wn=48, btype="high", fs=16000)
 
-input_audio_path2wav = {}
-
-
-@lru_cache
-def cache_harvest_f0(input_audio_path, fs, f0max, f0min, frame_period):
-    audio = input_audio_path2wav[input_audio_path]
+def harvest_f0(audio, fs, f0max, f0min, frame_period):
+    """Calculate F0 without retaining the complete waveform between requests."""
     f0, t = pyworld.harvest(
         audio,
         fs=fs,
@@ -123,7 +118,6 @@ class Pipeline(object):
         filter_radius,
         inp_f0=None,
     ):
-        global input_audio_path2wav
         time_step = self.window / self.sr * 1000
         f0_min = 50
         f0_max = 1100
@@ -146,8 +140,7 @@ class Pipeline(object):
                     f0, [[pad_size, p_len - len(f0) - pad_size]], mode="constant"
                 )
         elif f0_method == "harvest":
-            input_audio_path2wav[input_audio_path] = x.astype(np.double)
-            f0 = cache_harvest_f0(input_audio_path, self.sr, f0_max, f0_min, 10)
+            f0 = harvest_f0(x.astype(np.double), self.sr, f0_max, f0_min, 10)
             if filter_radius > 2:
                 f0 = signal.medfilt(f0, 3)
         elif f0_method == "crepe":

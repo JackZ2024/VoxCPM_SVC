@@ -7,6 +7,8 @@ import os
 import sys
 import shutil
 import threading
+import time
+import gc
 import types
 import urllib.request
 import zipfile
@@ -119,11 +121,40 @@ def sovits_convert_audio(audio_path: str, model_path: str, speaker_path: str, pi
 
 _rvc_vc = None
 _rvc_model_path = ""
+_rvc_lock = threading.RLock()
+_rvc_last_used_at = time.monotonic()
+try:
+    RVC_IDLE_UNLOAD_SECONDS = max(0.0, float(os.environ.get("RVC_IDLE_UNLOAD_SECONDS", "900")))
+except ValueError:
+    RVC_IDLE_UNLOAD_SECONDS = 900.0
+
+
+def unload_rvc_model_if_idle() -> bool:
+    """Release the cached RVC runtime after it has been idle long enough."""
+    global _rvc_vc, _rvc_model_path
+    if RVC_IDLE_UNLOAD_SECONDS <= 0:
+        return False
+    with _rvc_lock:
+        if _rvc_vc is None or time.monotonic() - _rvc_last_used_at < RVC_IDLE_UNLOAD_SECONDS:
+            return False
+        vc = _rvc_vc
+        _rvc_vc = None
+        _rvc_model_path = ""
+    del vc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    return True
 
 
 def rvc_convert_audio(audio_path: str, model_path: str, index_path: str, index_rate: float, pitch: int = 0):
     """Run RVC and cache its loaded voice model between requests."""
-    global _rvc_vc, _rvc_model_path
+    global _rvc_vc, _rvc_model_path, _rvc_last_used_at
     if not RVC_ROOT.is_dir():
         raise FileNotFoundError(f"RVC runtime directory is missing: {RVC_ROOT}")
     _install_rvc_infer_compatibility()
@@ -141,9 +172,13 @@ def rvc_convert_audio(audio_path: str, model_path: str, index_path: str, index_r
                 )
     if not rmvpe_path.is_file():
         raise FileNotFoundError(f"RVC RMVPE 预训练模型缺失：{rmvpe_path}")
-    if _rvc_vc is None:
-        _rvc_vc = VC(Config())
-    if _rvc_model_path != model_path:
-        _rvc_vc.get_vc(model_path, 0.33)
-        _rvc_model_path = model_path
-    return _rvc_vc.vc_single(0, audio_path, pitch, "", "rmvpe", index_path, "", index_rate, 3, 0, 0.25, 0.33, False)
+    with _rvc_lock:
+        if _rvc_vc is None:
+            _rvc_vc = VC(Config())
+        if _rvc_model_path != model_path:
+            _rvc_vc.get_vc(model_path, 0.33)
+            _rvc_model_path = model_path
+        try:
+            return _rvc_vc.vc_single(0, audio_path, pitch, "", "rmvpe", index_path, "", index_rate, 3, 0, 0.25, 0.33, False)
+        finally:
+            _rvc_last_used_at = time.monotonic()

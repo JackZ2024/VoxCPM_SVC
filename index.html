@@ -333,7 +333,9 @@
             // 自定义参考音频扩展状态
             const [customRefAudioFile, setCustomRefAudioFile] = useState(null);
             const [customRefAudioPath, setCustomRefAudioPath] = useState('');
+            const [customRefAudioLanguage, setCustomRefAudioLanguage] = useState('');
             const [customRefText, setCustomRefText] = useState('');
+            const [referenceSaveLanguage, setReferenceSaveLanguage] = useState('None');
             const [uploadingRefAudio, setUploadingRefAudio] = useState(false);
             const [savingReference, setSavingReference] = useState(false);
             const [deletingReference, setDeletingReference] = useState(false);
@@ -618,11 +620,19 @@
 
             // 参考音频上传逻辑
             const uploadCustomRefAudio = async (file) => {
+                const uploadLanguage = referenceSaveLanguage === 'None'
+                    ? selectedLanguage
+                    : referenceSaveLanguage;
+                if (!uploadLanguage) {
+                    alert('请先选择语种');
+                    return;
+                }
                 setUploadingRefAudio(true);
                 setCustomRefAudioPath('');
+                setCustomRefAudioLanguage('');
                 const formData = new FormData();
                 formData.append('file', file);
-                formData.append('language', selectedLanguage);
+                formData.append('language', uploadLanguage);
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/upload-reference`, {
                         method: 'POST',
@@ -631,12 +641,16 @@
                     if (!response.ok) throw new Error('上传接口返回非200');
                     const data = await response.json();
                     setCustomRefAudioPath(data.relative_path);
+                    setCustomRefAudioLanguage(uploadLanguage);
                     setCustomRefAudioFile(file);
+                    await fetchOptions();
+                    setSelectedLanguage(uploadLanguage);
                 } catch (error) {
                     console.error('参考音频上传出错:', error);
                     alert('参考音频上传失败，请重新选择！');
                     setCustomRefAudioFile(null);
                     setCustomRefAudioPath('');
+                    setCustomRefAudioLanguage('');
                 } finally {
                     setUploadingRefAudio(false);
                 }
@@ -653,7 +667,7 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            language: selectedLanguage,
+                            language: customRefAudioLanguage,
                             relative_path: customRefAudioPath,
                             reference_text: customRefText,
                             original_filename: customRefAudioFile?.name || ''
@@ -688,7 +702,7 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            language: selectedLanguage,
+                            language: customRefAudioLanguage || selectedLanguage,
                             relative_path: referenceToDelete
                         })
                     });
@@ -696,6 +710,7 @@
                     if (!response.ok) throw new Error(data.detail || '删除失败');
                     setCustomRefAudioFile(null);
                     setCustomRefAudioPath('');
+                    setCustomRefAudioLanguage('');
                     setCustomRefText('');
                     setSelectedReference('');
                     setRefText('');
@@ -1064,7 +1079,12 @@
                                     <span className="gr-label">语言</span>
                                     <select
                                         value={selectedLanguage}
-                                        onChange={(e) => setSelectedLanguage(e.target.value)}
+                                        onChange={(e) => {
+                                            setSelectedLanguage(e.target.value);
+                                            setCustomRefAudioFile(null);
+                                            setCustomRefAudioPath('');
+                                            setCustomRefAudioLanguage('');
+                                        }}
                                         className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
                                     >
                                         {options?.languages?.map(l => (
@@ -1346,6 +1366,7 @@
                                                 } else {
                                                     setCustomRefAudioFile(null);
                                                     setCustomRefAudioPath('');
+                                                    setCustomRefAudioLanguage('');
                                                 }
                                             }}
                                             disabled={uploadingRefAudio}
@@ -1378,6 +1399,25 @@
                                         >
                                             {deletingReference ? '删除中...' : '删除参考音频'}
                                         </button>
+                                    </div>
+                                    <div className="gr-input-wrapper flex flex-col">
+                                        <span className="gr-label">保存到语种</span>
+                                        <select
+                                            value={referenceSaveLanguage}
+                                            onChange={(e) => {
+                                                setReferenceSaveLanguage(e.target.value);
+                                                setCustomRefAudioFile(null);
+                                                setCustomRefAudioPath('');
+                                                setCustomRefAudioLanguage('');
+                                            }}
+                                            disabled={uploadingRefAudio || savingReference || deletingReference}
+                                            className="w-full border border-gray-300 rounded px-2 py-1 focus:border-orange-500 focus:outline-none text-sm text-gray-800 bg-white"
+                                        >
+                                            <option value="None">None（使用当前语种）</option>
+                                            {options?.reference_languages?.map(language => (
+                                                <option key={language} value={language}>{language}</option>
+                                            ))}
+                                        </select>
                                     </div>
                                 </div>
                             </div>

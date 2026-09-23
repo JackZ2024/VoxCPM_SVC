@@ -42,6 +42,15 @@ VOXCPM_MODEL_NAME = os.environ.get("VOXCPM_MODEL_NAME", "VoxCPM2")
 VOXCPM_MODEL_DIR = Path(os.environ.get("VOXCPM_MODEL_DIR", str(BASE_DIR / "pretrained_model")))
 VOXCPM_LORA_DIRS = (BASE_DIR / "lora_models", VOXCPM_MODEL_DIR / "lora")
 SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac"}
+# Languages offered when a user stores a custom reference recording.  A folder
+# is created on first upload, after which the existing directory scan exposes
+# that language in the normal TTS selector as well.
+REFERENCE_AUDIO_LANGUAGES = (
+    "阿拉伯语", "缅甸语", "汉语", "丹麦语", "荷兰语", "英语", "芬兰语", "法语", "德语",
+    "希腊语", "希伯来语", "印地语", "印尼语", "意大利语", "日语", "高棉语", "韩语",
+    "老挝语", "马来语", "挪威语", "波兰语", "葡萄牙语", "俄语", "西班牙语", "斯瓦希里语",
+    "瑞典语", "菲律宾", "泰语", "土耳其语", "越南语",
+)
 # torch.compile/Inductor requires a Triton version matched to the installed
 # PyTorch build. Keep it disabled by default for deployment compatibility.
 VOXCPM_OPTIMIZE = os.environ.get("VOXCPM_OPTIMIZE", "false").strip().lower() in {"1", "true", "yes"}
@@ -190,8 +199,10 @@ def _voxcpm_idle_unloader() -> None:
         time.sleep(60)
         try:
             unload_voxcpm_model_if_idle()
+            from voxcpm_postprocess import unload_rvc_model_if_idle
+            unload_rvc_model_if_idle()
         except Exception as exc:
-            print(f"VoxCPM idle cleanup failed: {exc}")
+            print(f"Model idle cleanup failed: {exc}")
 
 
 def get_language_lora_models(language: str) -> dict[str, Path]:
@@ -255,6 +266,47 @@ def apply_audio_tempo(audio_path: Path, tempo: float) -> None:
         raise RuntimeError(f"FFmpeg 调整语速失败：{detail}") from error
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def concatenate_audio_files(segment_paths: List[Path], output_path: Path, sample_rate: int, silence_seconds: float) -> None:
+    """Concatenate WAV segments in blocks so an entire request is not held in RAM."""
+    if not segment_paths:
+        raise ValueError("没有可拼接的音频")
+    silence_frames = max(0, int(silence_seconds * sample_rate))
+    block_frames = 64 * 1024
+    with sf.SoundFile(output_path, mode="w", samplerate=sample_rate, channels=1, subtype="PCM_24") as output:
+        for index, segment_path in enumerate(segment_paths):
+            with sf.SoundFile(segment_path, mode="r") as segment:
+                if segment.samplerate != sample_rate or segment.channels != 1:
+                    raise ValueError(f"音频片段格式不一致: {segment_path.name}")
+                while True:
+                    block = segment.read(block_frames, dtype="float32", always_2d=False)
+                    if len(block) == 0:
+                        break
+                    output.write(block)
+            if index < len(segment_paths) - 1 and silence_frames:
+                remaining = silence_frames
+                while remaining:
+                    frame_count = min(remaining, block_frames)
+                    output.write(np.zeros(frame_count, dtype=np.float32))
+                    remaining -= frame_count
+
+
+def export_audio_mp3(input_path: Path, output_path: Path) -> None:
+    """Encode MP3 with FFmpeg without loading the complete WAV into Python memory."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(input_path), "-c:a", "libmp3lame", "-b:a", "192k", str(output_path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("未找到 FFmpeg，无法导出 MP3") from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.decode("utf-8", errors="replace") if error.stderr else ""
+        detail = stderr.strip().splitlines()[-1] if stderr else "未知 FFmpeg 错误"
+        raise RuntimeError(f"FFmpeg 导出 MP3 失败：{detail}") from error
 
 
 def format_file_created_at(stat_result: os.stat_result) -> str:
@@ -408,6 +460,7 @@ class AvailableOptions(BaseModel):
     svc_types: List[str]
     svc_models: List[AvailableOptionSVCModel]
     references: List[AvailableOptionReference]
+    reference_languages: List[str]
 
 
 class AudioGenerationTask:
@@ -626,7 +679,11 @@ class AudioGenerationTask:
 
     def _infer(self):
         """Generate VoxCPM ultimate-clone segments, then optionally apply SVC/RVC."""
-        from voxcpm_postprocess import concatenate_with_silence, rvc_convert_audio, sovits_convert_audio
+        from voxcpm_postprocess import (
+            concatenate_with_silence,
+            rvc_convert_audio,
+            sovits_convert_audio,
+        )
 
         request = self.request_data
         ref_directory = (BASE_DIR / "refs" / request.language).resolve()
@@ -1090,6 +1147,7 @@ def _get_available_options() :
         'svc_types': [],
         'svc_models': [],
         'references': [],
+        'reference_languages': list(REFERENCE_AUDIO_LANGUAGES),
     }
     # Languages are defined solely by reference-audio folders.
     reference_path = BASE_DIR / 'refs'
@@ -1223,8 +1281,7 @@ async def upload_reference_audio(
     language: str = Form(...),
 ):
     """Store a user-supplied reference audio file under its selected language."""
-    available_languages = {item["name"] for item in _get_available_options()["languages"]}
-    if language not in available_languages:
+    if language not in REFERENCE_AUDIO_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"不支持的语言: {language}")
 
     suffix = Path(file.filename or "").suffix.lower()
@@ -1247,8 +1304,7 @@ async def upload_reference_audio(
 
 def _resolve_user_reference_path(language: str, relative_path: str) -> tuple[Path, Path, Path]:
     """Resolve a custom reference path and ensure it remains in its language directory."""
-    available_languages = {item["name"] for item in _get_available_options()["languages"]}
-    if language not in available_languages:
+    if language not in REFERENCE_AUDIO_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"不支持的语言: {language}")
     reference_directory = (BASE_DIR / "refs" / language).resolve()
     upload_directory = (reference_directory / ".uploads").resolve()
