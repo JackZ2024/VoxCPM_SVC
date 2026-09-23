@@ -783,6 +783,11 @@
             const executeTts = async () => {
                 const useCustomReference = Boolean(customRefAudioPath);
                 const selectedRefText = useCustomReference ? customRefText.trim() : refText.trim();
+                // If audio conversion is enabled but this language has no selected
+                // SVC/RVC model, generate the original TTS audio as usual.
+                const canUseSvc = enableSvc
+                    && Boolean(selectedSvcType && selectedSvcModel)
+                    && filteredSvcModels.some(model => model.name === selectedSvcModel);
                 const requestData = {
                     ref_audio_orig: useCustomReference ? customRefAudioPath : selectedReference,
                     ref_text: enableHifi ? selectedRefText : '',
@@ -796,7 +801,7 @@
                     style_prompt: stylePrompt,
                     enable_hifi: enableHifi,
                     save_line_audio: saveLineAudio,
-                    enable_svc: enableSvc,
+                    enable_svc: canUseSvc,
                     svc_type: selectedSvcType,
                     svc_model: selectedSvcModel,
                     tone_shift: parseInt(toneShift) || 0,
@@ -1276,12 +1281,12 @@
 
                                 <div className="gr-input-wrapper md:col-span-1 flex flex-row items-center justify-center gap-2">
                                     <span className={`w-6 h-6 rounded-full block flex-shrink-0 ${generating ? 'bg-blue-500' : 'bg-green-500'}`}></span>
-                                    <input
-                                        type="text"
-                                        readOnly
-                                        value={runningInfo}
-                                        className="w-full bg-transparent text-sm text-left font-bold text-gray-700 py-1"
-                                    />
+                                    <div
+                                        title={runningInfo}
+                                        className="w-full bg-transparent text-sm text-left font-bold text-gray-700 py-1 leading-5 break-words"
+                                    >
+                                        {runningInfo}
+                                    </div>
                                 </div>
                             </div>
 

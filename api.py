@@ -653,8 +653,8 @@ class AudioGenerationTask:
         temp_dir = output_dir / "tmp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         enable_svc, model_path, aux_path = get_svc_model(request.enable_svc, request.svc_type, request.svc_model, request.language)
-        if request.enable_svc and not enable_svc:
-            raise FileNotFoundError("选择的 SVC/RVC 模型不存在或未选择")
+        # Conversion is optional.  A missing or unavailable SVC/RVC model means
+        # that the original TTS audio is returned instead of failing the task.
 
         lora_dir = None if request.model_name == "None" else get_language_lora_models(request.language).get(request.model_name)
         if request.model_name != "None" and lora_dir is None:
@@ -1030,6 +1030,7 @@ def get_svc_model(enable_svc, svc_type, svc_model, lang_alone):
                 return get_sovits_model(svc_model, lang_alone)
             elif svc_type.lower() == "rvc":
                 return get_rvc_model(svc_model, lang_alone)
+            return False, "", ""
     else:
         return False, "", ""
 
